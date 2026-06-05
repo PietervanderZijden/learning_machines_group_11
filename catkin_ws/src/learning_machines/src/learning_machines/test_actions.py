@@ -31,7 +31,6 @@ def test_move_and_wheel_reset(rob: IRobobo):
 
 
 def test_sensors(rob: IRobobo):
-    print("IRS data: ", rob.read_irs())
     image = rob.read_image_front()
     cv2.imwrite(str(FIGURES_DIR / "photo.png"), image)
     print("Phone pan: ", rob.read_phone_pan())
@@ -111,10 +110,6 @@ def run_all_actions(rob: IRobobo):
         },
     )
     if isinstance(rob, SimulationRobobo):
-        rob.play_simulation()
-    test_sensors(rob)
-    if isinstance(rob, SimulationRobobo):
-        rob.stop_simulation()
         for runNum in range(run.config["simRuns"]):
             rob.play_simulation()
             test_move_and_return(rob, runNum, True)
