@@ -3,31 +3,7 @@ import time
 import cv2
 import wandb
 from data_files import FIGURES_DIR
-from robobo_interface import (
-    Emotion,
-    HardwareRobobo,
-    IRobobo,
-    LedColor,
-    LedId,
-    SimulationRobobo,
-    SoundEmotion,
-)
-from wandb.sdk.lib import run_moment
-
-
-def test_emotions(rob: IRobobo):
-    rob.set_emotion(Emotion.HAPPY)
-    rob.talk("Hello")
-    rob.play_emotion_sound(SoundEmotion.PURR)
-    rob.set_led(LedId.FRONTCENTER, LedColor.GREEN)
-
-
-def test_move_and_wheel_reset(rob: IRobobo):
-    rob.move_blocking(100, 100, 1000)
-    print("before reset: ", rob.read_wheels())
-    rob.reset_wheels()
-    rob.sleep(1)
-    print("after reset: ", rob.read_wheels())
+from robobo_interface import HardwareRobobo, IRobobo, SimulationRobobo
 
 
 def test_sensors(rob: IRobobo):
@@ -39,66 +15,65 @@ def test_sensors(rob: IRobobo):
     print("Current orientation: ", rob.read_orientation())
 
 
-def test_phone_movement(rob: IRobobo):
-    rob.set_phone_pan_blocking(20, 100)
-    print("Phone pan after move to 20: ", rob.read_phone_pan())
-    rob.set_phone_tilt_blocking(50, 100)
-    print("Phone tilt after move to 50: ", rob.read_phone_tilt())
-
-
-def test_sim(rob: SimulationRobobo):
-    print("Current simulation time:", rob.get_sim_time())
-    print("Is the simulation currently running? ", rob.is_running())
-    rob.stop_simulation()
-    print("Simulation time after stopping:", rob.get_sim_time())
-    print("Is the simulation running after shutting down? ", rob.is_running())
-    rob.play_simulation()
-    print("Simulation time after starting again: ", rob.get_sim_time())
-    print("Current robot position: ", rob.get_position())
-    print("Current robot orientation: ", rob.get_orientation())
-
-    pos = rob.get_position()
-    orient = rob.get_orientation()
-    rob.set_position(pos, orient)
-    print("Position the same after setting to itself: ", pos == rob.get_position())
-    print("Orient the same after setting to itself: ", orient == rob.get_orientation())
-
-
-def test_hardware(rob: HardwareRobobo):
-    print("Phone battery level: ", rob.phone_battery())
-    print("Robot battery level: ", rob.robot_battery())
-
-
 def test_move_and_return(rob: IRobobo, runNum, sim):
-    irs = rob.read_irs()
     timestep = 0
     while True:
         timestep += 1
-        if irs != [] and irs[4] <= 100:
+        irs = rob.read_irs()
+        if irs != [] and irs[4] <= 20:
             print(f"IRS data: {irs[4]}; moving forward!")
             wandb.log(
                 {
                     "Is Simulation": sim,
                     "Run Num": runNum,
                     "Front Center IR Data": irs[4],
+                    "Back Center IR Data": irs[6],
                     "Timestep": timestep,
                     "Turn Around": False,
                 }
             )
-            rob.move_blocking(10, 10, 50)
-        else:
-            print(f"IRS data: {irs[4]}; turning around!")
-            rob.move_blocking(20, -20, 100)
-            wandb.log(
-                {
-                    "Is Simulation": sim,
-                    "Run Num": runNum,
-                    "Front Center IR Data": irs[4],
-                    "Timestep": timestep,
-                    "Turn Around": True,
-                }
+            rob.move_blocking(20, 20, 200)
+
+        elif irs != []:
+            block_reading = irs[4]
+            plant_reading = irs[6]
+            print(
+                f"Block detected ({block_reading:.2f}). Plant behind ({plant_reading:.2f}). Turning..."
             )
-            print("Turned around!")
+
+            front_cleared = False  # Phase 1: confirm we've rotated past the block
+
+            while True:
+                newIRS = rob.read_irs()
+                print(
+                    f"Turning... Front: {newIRS[4]:.2f}, Back: {newIRS[6]:.2f}, front_cleared: {front_cleared}"
+                )
+                wandb.log(
+                    {
+                        "Is Simulation": sim,
+                        "Run Num": runNum,
+                        "Front Center IR Data": newIRS[4],
+                        "Back Center IR Data": newIRS[6],
+                        "Timestep": timestep,
+                        "Turn Around": True,
+                    }
+                )
+
+                # Phase 1: wait until FrontC drops — robot has rotated past the block
+                if not front_cleared:
+                    if newIRS[4] < block_reading * 0.5:
+                        front_cleared = True
+                        print("Block no longer in front. Watching for it behind...")
+
+                else:
+                    if newIRS[6] > plant_reading * 1.5:
+                        print(
+                            f"Turned around! Back: {newIRS[6]:.2f} (threshold: {plant_reading * 1.5:.2f})"
+                        )
+                        break
+
+                rob.move_blocking(20, -20, 100)
+            rob.move_blocking(20, 20, 10000)
             break
 
 
@@ -108,6 +83,7 @@ def run_all_actions(rob: IRobobo):
         config={
             "simRuns": 5,
         },
+        mode="online",
     )
     if isinstance(rob, SimulationRobobo):
         for runNum in range(run.config["simRuns"]):
@@ -123,6 +99,18 @@ def run_all_actions(rob: IRobobo):
             reset = input("Reset? (y/n)")
             if reset != "y":
                 break
+            else:
+                print("Resetting in 5...", end="")
+                time.sleep(1)
+                print("4...", end="")
+                time.sleep(1)
+                print("3...", end="")
+                time.sleep(1)
+                print("2...", end="")
+                time.sleep(1)
+                print("1...")
+                time.sleep(1)
+                print("Resetting!")
 
     if isinstance(rob, SimulationRobobo):
         rob.stop_simulation()
