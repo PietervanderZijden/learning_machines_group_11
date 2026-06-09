@@ -89,10 +89,8 @@ def main(
     """
     Start SAC training.
 
-    This is the function you should call if your __init__.py imports main.
-
     Example:
-        from your_package import main
+        from package import main
 
         main()
 
