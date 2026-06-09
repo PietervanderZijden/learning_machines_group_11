@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import wandb
-from rl_robobo_env import RoboboObstacleAvoidanceEnv, RoboboObstacleEnvConfig
+from learning_machines.rl_robobo_env import (
+    RoboboObstacleAvoidanceEnv,
+    RoboboObstacleEnvConfig,
+)
 from stable_baselines3 import SAC
 from stable_baselines3.common.monitor import Monitor
 

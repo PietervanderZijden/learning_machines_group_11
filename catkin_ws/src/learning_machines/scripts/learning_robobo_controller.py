@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 import sys
 
-from learning_machines import (
-    RoboboCombinedExtractor,
-    RoboboObstacleAvoidanceEnv,
-    RoboboObstacleEnvConfig,
-    main,
-    test,
-)
+from learning_machines import main, test
 from robobo_interface import HardwareRobobo, SimulationRobobo
 
 if __name__ == "__main__":

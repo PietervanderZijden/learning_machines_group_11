@@ -188,5 +188,5 @@ CoppeliaSim.tar.xz
 .DS_Store
 
 # Scripts
-scripts/setup.bash
+scripts/setup*
 scripts/start_coppelia_sim.*

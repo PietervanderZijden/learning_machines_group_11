@@ -5,8 +5,11 @@ from typing import Any
 
 import torch as th
 import wandb
-from rl_robobo_env import RoboboObstacleAvoidanceEnv, RoboboObstacleEnvConfig
-from robobo_sac_policy import RoboboCombinedExtractor
+from learning_machines.rl_robobo_env import (
+    RoboboObstacleAvoidanceEnv,
+    RoboboObstacleEnvConfig,
+)
+from learning_machines.robobo_sac_policy import RoboboCombinedExtractor
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.env_checker import check_env
@@ -175,9 +178,9 @@ def main(
         env=env,
         policy_kwargs=policy_kwargs,
         learning_rate=3e-4,
-        buffer_size=100_000,
+        buffer_size=200_000,
         learning_starts=2_000,
-        batch_size=128,
+        batch_size=256,
         tau=0.005,
         gamma=0.99,
         train_freq=(1, "step"),
