@@ -45,8 +45,6 @@ class RoboboObstacleEnvConfig:
 
 class RoboboObstacleAvoidanceEnv(gym.Env):
     """
-    Stable-Baselines3-compatible environment for Robobo obstacle avoidance.
-
     Observation:
         Dict:
             image:
@@ -186,9 +184,6 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
 
             rob.stop_simulation()
             rob.play_simulation()
-
-        Your provided SimulationRobobo class calls this play_simulation(), so this
-        method supports both names.
         """
 
         if not self.rob.is_stopped():

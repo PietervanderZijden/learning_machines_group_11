@@ -21,7 +21,7 @@ def test(
     Test/evaluate a trained SAC model.
 
     Example:
-        from your_package import test
+        from package import test
 
         test()
 
