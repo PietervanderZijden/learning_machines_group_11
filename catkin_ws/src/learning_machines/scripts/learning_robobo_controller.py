@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys
 
-from learning_machines import main, test
+from learning_machines import run_all_actions
 from robobo_interface import HardwareRobobo, SimulationRobobo
 
 if __name__ == "__main__":
@@ -18,5 +18,4 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"{sys.argv[1]} is not a valid argument.")
 
-    main()
-    test()
+    run_all_actions(rob)

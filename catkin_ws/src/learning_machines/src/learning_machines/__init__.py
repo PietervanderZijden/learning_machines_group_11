@@ -1,12 +1,3 @@
-from .rl_robobo_env import RoboboObstacleAvoidanceEnv, RoboboObstacleEnvConfig
-from .robobo_sac_policy import RoboboCombinedExtractor
-from .test_obstacle_avoidance import test
-from .train_obstacle_avoidance import main
+from .prob_ir_sensor import run_all_actions
 
-__all__ = (
-    "main",
-    "test",
-    "RoboboObstacleEnvConfig",
-    "RoboboObstacleAvoidanceEnv",
-    "RoboboCombinedExtractor",
-)
+__all__ = "run_all_actions"
