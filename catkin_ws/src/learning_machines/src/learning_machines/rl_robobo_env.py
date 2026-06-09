@@ -179,28 +179,21 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             self.rob.stop_simulation()
 
     def _reset_simulation(self) -> None:
-        """
-        Reset sequence requested by you:
-
-            rob.stop_simulation()
-            rob.play_simulation()
-        """
 
         if not self.rob.is_stopped():
             self.rob.stop_simulation()
 
-        # Put the robot back at the initial pose while simulation is stopped.
-        self.rob.set_position(
-            self._initial_position,
-            self._initial_orientation,
-        )
+        # self.rob.set_position(
+        #     self._initial_position,
+        #     self._initial_orientation,
+        # )
 
         self.rob.play_simulation()
 
-        self.rob.sleep(self.config.reset_settle_seconds)
+        # self.rob.sleep(self.config.reset_settle_seconds)
 
         # Stop any residual wheel motion.
-        self.rob.move_blocking(0, 0, 50)
+        # self.rob.move_blocking(0, 0, 50)
 
     def _get_obs(self) -> dict[str, np.ndarray]:
         return {
