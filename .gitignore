@@ -186,3 +186,7 @@ CoppeliaSim.tar.xz
 
 # macOS stuff
 .DS_Store
+
+# Scripts
+scripts/setup.bash
+scripts/start_coppelia_sim.*

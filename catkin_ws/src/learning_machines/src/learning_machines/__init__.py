@@ -1,3 +1,4 @@
-from .test_actions import run_all_actions
+from .test_obstacle_avoidance import test
+from .train_obstacle_avoidance import main
 
-__all__ = ("run_all_actions",)
+__all__ = ("main", "test")
