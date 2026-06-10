@@ -1,28 +1,25 @@
 import os
+import signal
 import sys
 import time
-import signal
+from typing import Callable, List, NoReturn, Optional, TypeVar
 
 import cv2
 import numpy
-
+from coppeliasim_zmqremoteapi_client import RemoteAPIClient
+from numpy.typing import NDArray
 from robobo_interface.base import IRobobo
 from robobo_interface.datatypes import (
+    Acceleration,
     Emotion,
     LedColor,
     LedId,
-    Acceleration,
-    Position,
     Orientation,
-    WheelPosition,
+    Position,
     SoundEmotion,
+    WheelPosition,
 )
 from robobo_interface.utils import LockedSet
-
-from coppeliasim_zmqremoteapi_client import RemoteAPIClient
-
-from typing import Callable, List, NoReturn, Optional, TypeVar
-from numpy.typing import NDArray
 
 T = TypeVar("T")
 
@@ -95,10 +92,8 @@ class SimulationRobobo(IRobobo):
             self._fail_connect(api_port, ip_adress)
 
         self._initialise_handles()
-        self._logger(
-            f"""Connected to remote CoppeliaSim API server at port {api_port}
-            Connected to robot: {self._identifier}"""
-        )
+        self._logger(f"""Connected to remote CoppeliaSim API server at port {api_port}
+            Connected to robot: {self._identifier}""")
 
     def set_emotion(self, emotion: Emotion) -> None:
         """Show the emotion of the robot on the screen
@@ -390,6 +385,8 @@ class SimulationRobobo(IRobobo):
     def play_simulation(self):
         """Start the simulation"""
         self._sim.startSimulation()
+        while not self.is_running():
+            time.sleep(0.002)
 
     def pause_simulation(self):
         """Pause the simulation"""
@@ -566,15 +563,13 @@ class SimulationRobobo(IRobobo):
         return ret
 
     def _fail_connect(self, api_port: int, ip_adress: str) -> NoReturn:
-        self._logger(
-            """CoppeliaSim Api Connection Error
+        self._logger("""CoppeliaSim Api Connection Error
             Failed connecting to remote API server
             Is CoppeliaSim turned on (with the ZMQ remote API available)?
 
             If not on Linux with --net=host:
             Did you specify the IP adress of your computer in scripts/setup.bash?
-            """
-        )
+            """)
         self._logger(f"Looked for API at port: {api_port} at IP adress: {ip_adress}")
         # Yes, sys.exit(1) gets caught by the zmq runtime. No, I don't know why.
         quit_hard()

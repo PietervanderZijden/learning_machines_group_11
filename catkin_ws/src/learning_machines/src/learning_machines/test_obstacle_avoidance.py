@@ -51,6 +51,7 @@ def test(
         max_ir_value=400.0,
         obstacle_penalty_threshold=0.15,
         collision_ir_threshold=0.85,
+        reset_settle_seconds=0.1,
     )
 
     env = Monitor(RoboboObstacleAvoidanceEnv(config=config))

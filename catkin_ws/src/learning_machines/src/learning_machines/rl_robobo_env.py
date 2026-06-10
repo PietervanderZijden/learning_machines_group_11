@@ -28,14 +28,26 @@ class RoboboObstacleEnvConfig:
     collision_ir_threshold: float = 0.85
 
     progress_normalizer_m: float = 0.05
-    progress_reward_scale: float = 1.0
-    distance_bonus_scale: float = 0.02
+    progress_reward_scale: float = 2.0
+
+    distance_bonus_scale: float = 0.0
+
     obstacle_penalty_scale: float = 0.15
     front_obstacle_penalty_scale: float = 0.25
-    action_penalty_scale: float = 0.02
+
+    action_penalty_scale: float = 0.0
+
     turning_penalty_scale: float = 0.02
     alive_bonus: float = 0.01
     collision_penalty: float = 5.0
+
+    idle_penalty_scale: float = 0.15
+    idle_speed_threshold: float = 0.15
+
+    movement_bonus_scale: float = 0.05
+
+    fc_early_penalty_scale: float = 0.1
+    fc_early_threshold: float = 0.15
 
     reset_settle_seconds: float = 0.25
 
@@ -52,7 +64,8 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
                 Shape: (1, H, W)
                 Dtype: uint8
             ir:
-                Normalized IR sensor values.
+                Normalized IR sensor readings: [BackL, BackR, FrontL, FrontR,
+                FrontC, FrontRR, BackC, FrontLL]
                 Shape: (8,)
                 Dtype: float32
 
@@ -62,7 +75,9 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             action[1] = right wheel command
 
     Reward objective:
-        Move as far away from the episode start as possible while avoiding objects.
+        Keep moving as far as possible from the episode start while avoiding
+        collisions. The robot is penalised for idling so it cannot exploit the
+        alive_bonus by sitting still.
     """
 
     metadata = {"render_modes": []}
@@ -180,21 +195,11 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             self.rob.stop_simulation()
 
     def _reset_simulation(self) -> None:
-
         if not self.rob.is_stopped():
             self.rob.stop_simulation()
 
-        # self.rob.set_position(
-        #     self._initial_position,
-        #     self._initial_orientation,
-        # )
-
         self.rob.play_simulation()
-
-        # self.rob.sleep(self.config.reset_settle_seconds)
-
-        # Stop any residual wheel motion.
-        # self.rob.move_blocking(0, 0, 50)
+        self.rob.sleep(self.config.reset_settle_seconds)
 
     def _get_obs(self) -> dict[str, np.ndarray]:
         return {
@@ -300,6 +305,13 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
                 front_closeness - self.config.obstacle_penalty_threshold
             )
 
+        fc_early_penalty = 0.0
+        fc_value = float(obs["ir"][4])
+        if fc_value > self.config.fc_early_threshold:
+            fc_early_penalty = self.config.fc_early_penalty_scale * (
+                fc_value - self.config.fc_early_threshold
+            )
+
         action_penalty = self.config.action_penalty_scale * float(
             np.mean(np.abs(action))
         )
@@ -308,22 +320,29 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         if action[0] * action[1] < 0.0:
             turning_penalty = self.config.turning_penalty_scale
 
-        fc_early_penalty = 0.0
-        FC_INDEX = 4
-        FC_THRESHOLD = 0.05
-        FC_PENALTY_SCALE = 0.3
+        mean_abs_action = float(np.mean(np.abs(action)))
+        idle_penalty = 0.0
+        if mean_abs_action < self.config.idle_speed_threshold:
+            idle_penalty = self.config.idle_penalty_scale * (
+                1.0 - mean_abs_action / self.config.idle_speed_threshold
+            )
 
-        fc_value = float(obs["ir"][FC_INDEX])
-        if fc_value > FC_THRESHOLD:
-            fc_early_penalty = FC_PENALTY_SCALE * (fc_value - FC_THRESHOLD)
+        forward_component = float((action[0] + action[1]) / 2.0)
+        movement_bonus = (
+            self.config.movement_bonus_scale * forward_component
+            if forward_component > 0.0
+            else 0.0
+        )
 
         reward = (
             progress_reward
             + distance_bonus
+            + movement_bonus
             + self.config.alive_bonus
             - obstacle_penalty
             - front_obstacle_penalty
             - fc_early_penalty
+            - idle_penalty
             - action_penalty
             - turning_penalty
         )
