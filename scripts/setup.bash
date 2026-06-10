@@ -8,6 +8,6 @@ export ROS_MASTER_URI="http://localhost:11311"
 # linux:
 #    hostname -I | awk '{print $1}'
 # macOS:
-#    ipconfig getifaddr en1
-export COPPELIA_SIM_IP="192.168.2.15"
+#    ipconfig getifaddr en0
+export COPPELIA_SIM_IP="10.15.2.224"
  
