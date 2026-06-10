@@ -201,6 +201,8 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         self.rob.play_simulation()
         self.rob.sleep(self.config.reset_settle_seconds)
 
+        self.rob.set_phone_tilt_blocking(100, 100)
+
     def _get_obs(self) -> dict[str, np.ndarray]:
         return {
             "image": self._read_grayscale_image(),
