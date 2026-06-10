@@ -23,15 +23,15 @@ class RoboboObstacleEnvConfig:
 
     max_episode_steps: int = 500
 
-    max_ir_value: float = 100.0
-    obstacle_penalty_threshold: float = 0.35
+    max_ir_value: float = 400.0
+    obstacle_penalty_threshold: float = 0.15
     collision_ir_threshold: float = 0.85
 
     progress_normalizer_m: float = 0.05
     progress_reward_scale: float = 1.0
     distance_bonus_scale: float = 0.02
-    obstacle_penalty_scale: float = 0.4
-    front_obstacle_penalty_scale: float = 0.6
+    obstacle_penalty_scale: float = 0.15
+    front_obstacle_penalty_scale: float = 0.25
     action_penalty_scale: float = 0.02
     turning_penalty_scale: float = 0.02
     alive_bonus: float = 0.01
@@ -164,6 +164,7 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             action=action,
             info=info,
             terminated=terminated,
+            obs=obs,
         )
 
         info["reward"] = reward
@@ -267,10 +268,7 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         }
 
     def _compute_reward(
-        self,
-        action: np.ndarray,
-        info: dict[str, Any],
-        terminated: bool,
+        self, action: np.ndarray, info: dict[str, Any], terminated: bool, obs
     ) -> float:
         current_distance = float(info["distance_from_start"])
 
@@ -310,12 +308,22 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         if action[0] * action[1] < 0.0:
             turning_penalty = self.config.turning_penalty_scale
 
+        fc_early_penalty = 0.0
+        FC_INDEX = 4
+        FC_THRESHOLD = 0.05
+        FC_PENALTY_SCALE = 0.3
+
+        fc_value = float(obs["ir"][FC_INDEX])
+        if fc_value > FC_THRESHOLD:
+            fc_early_penalty = FC_PENALTY_SCALE * (fc_value - FC_THRESHOLD)
+
         reward = (
             progress_reward
             + distance_bonus
             + self.config.alive_bonus
             - obstacle_penalty
             - front_obstacle_penalty
+            - fc_early_penalty
             - action_penalty
             - turning_penalty
         )

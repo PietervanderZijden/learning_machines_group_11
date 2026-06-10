@@ -49,7 +49,7 @@ def test(
         step_millis=200,
         max_episode_steps=500,
         max_ir_value=400.0,
-        obstacle_penalty_threshold=0.35,
+        obstacle_penalty_threshold=0.15,
         collision_ir_threshold=0.85,
     )
 
