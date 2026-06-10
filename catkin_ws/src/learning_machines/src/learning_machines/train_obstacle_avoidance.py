@@ -15,7 +15,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.monitor import Monitor
 
-RUN_DIR = Path("results/runs/robobo_obstacle_sac")
+RUN_DIR = Path("/root/results/runs/robobo_obstacle_sac")
 MODEL_DIR = RUN_DIR / "models"
 LOG_DIR = RUN_DIR / "logs"
 
@@ -102,11 +102,11 @@ def main(
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     config = RoboboObstacleEnvConfig(
-        image_size=(84, 84),
+        image_size=(100, 100),
         max_wheel_speed=100,
         step_millis=200,
         max_episode_steps=500,
-        max_ir_value=100.0,
+        max_ir_value=400.0,
         obstacle_penalty_threshold=0.35,
         collision_ir_threshold=0.85,
         progress_normalizer_m=0.05,
@@ -176,9 +176,9 @@ def main(
         env=env,
         policy_kwargs=policy_kwargs,
         learning_rate=3e-4,
-        buffer_size=200_000,
+        buffer_size=100_000,
         learning_starts=2_000,
-        batch_size=256,
+        batch_size=128,
         tau=0.005,
         gamma=0.99,
         train_freq=(1, "step"),

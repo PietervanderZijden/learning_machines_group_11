@@ -10,7 +10,7 @@ from learning_machines.rl_robobo_env import (
 from stable_baselines3 import SAC
 from stable_baselines3.common.monitor import Monitor
 
-MODEL_PATH = Path("results/runs/robobo_obstacle_sac/models/robobo_sac_final.zip")
+MODEL_PATH = Path("/root/results/runs/robobo_obstacle_sac/models/robobo_sac_final.zip")
 
 
 def test(
@@ -44,11 +44,11 @@ def test(
     )
 
     config = RoboboObstacleEnvConfig(
-        image_size=(84, 84),
+        image_size=(100, 100),
         max_wheel_speed=100,
         step_millis=200,
         max_episode_steps=500,
-        max_ir_value=100.0,
+        max_ir_value=400.0,
         obstacle_penalty_threshold=0.35,
         collision_ir_threshold=0.85,
     )
