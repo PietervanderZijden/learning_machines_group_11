@@ -34,7 +34,7 @@ class MultiRoboboObstacleAvoidanceEnv(gym.Env):
         identifiers: Sequence[int] = (0, 1, 2),
         config: Optional[RoboboObstacleEnvConfig] = None,
         switch_every_steps: int = 500,
-        avoid_immediate_repeat: bool = True,
+        avoid_immediate_repeat: bool = False,
     ) -> None:
         super().__init__()
 

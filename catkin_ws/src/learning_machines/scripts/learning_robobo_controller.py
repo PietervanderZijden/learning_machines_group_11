@@ -19,5 +19,5 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"{sys.argv[1]} is not a valid argument.")
 
-    main()
+    main(total_timesteps=200_000, wandb_mode="offline")
     test()
