@@ -20,8 +20,5 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"{sys.argv[1]} is not a valid argument.")
 
-    # main(total_timesteps=200_000, wandb_mode="online")
-    test(
-        model_path="/root/results/runs/robobo_obstacle_sac/models/robobo_sac_110000_steps",
-        wandb_mode="offline",
-    )
+    main(total_timesteps=200_000, wandb_mode="online")
+    test()
