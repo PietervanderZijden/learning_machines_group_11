@@ -71,15 +71,27 @@ def move(rob: IRobobo):
     save_csv()
 
 
+def change_camera(rob):
+    # rob.set_phone_tilt_blocking(50, 20)
+    print("Set tilt 50")
+    # rob.set_phone_tilt_blocking(20, 20)
+    print("Set tilt 20")
+    rob.set_phone_tilt_blocking(109, 20)
+    print("Set tilt 100")
+    input()
+
+
 def run_all_actions(rob: IRobobo):
     run = wandb.init(
         project="learning-machines",
-        mode="online",
+        mode="offline",
     )
 
     if isinstance(rob, SimulationRobobo):
         rob.play_simulation()
-        move(rob)
+        change_camera(rob)
+        print("Done")
+        # move(rob)
 
     if isinstance(rob, SimulationRobobo):
         rob.stop_simulation()
