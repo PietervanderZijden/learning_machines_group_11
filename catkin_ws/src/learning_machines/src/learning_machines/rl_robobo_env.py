@@ -382,11 +382,11 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             )
 
         forward_component = float(min(action[0], action[1]))
-        movement_bonus = (
-            self.config.movement_bonus_scale * forward_component
-            if forward_component > 0.0
-            else 0.0
-        )
+
+        if forward_component > 0.0:
+            movement_bonus = self.config.movement_bonus_scale * forward_component
+        else:
+            movement_bonus = self.config.movement_bonus_scale * forward_component * 2.0
 
         reward = (
             progress_reward

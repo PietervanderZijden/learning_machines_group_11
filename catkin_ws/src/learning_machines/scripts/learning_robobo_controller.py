@@ -15,9 +15,13 @@ if __name__ == "__main__":
         rob = HardwareRobobo(camera=True)
     elif sys.argv[1] == "--simulation":
         # rob = SimulationRobobo(idendifier=1)
-        rob = SimulationRobobo()
+        # rob = SimulationRobobo()
+        pass
     else:
         raise ValueError(f"{sys.argv[1]} is not a valid argument.")
 
-    main(total_timesteps=200_000, wandb_mode="offline")
-    test()
+    # main(total_timesteps=200_000, wandb_mode="online")
+    test(
+        model_path="/root/results/runs/robobo_obstacle_sac/models/robobo_sac_110000_steps",
+        wandb_mode="offline",
+    )
