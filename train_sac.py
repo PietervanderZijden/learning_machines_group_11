@@ -9,10 +9,12 @@ Usage:
     python train_sac.py
     python train_sac.py --total-timesteps 500000
     python train_sac.py --resume
+    python train_sac.py --no-wandb
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import datetime
 from pathlib import Path
@@ -93,10 +95,7 @@ class RoboboGoalEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def compute_reward(self, achieved_goal, desired_goal, info):
-        """HER reward: +1.0 if achieved >= desired, else 0.0.
-
-        Supports batched (2D) and unbatched (1D) inputs.
-        """
+        """HER reward: +1.0 if achieved >= desired, else 0.0."""
         ag = np.asarray(achieved_goal, dtype=np.float32)
         dg = np.asarray(desired_goal, dtype=np.float32)
         if ag.ndim == 1:
@@ -122,25 +121,40 @@ def main():
     parser.add_argument("--buffer-size", type=int, default=1_000_000)
     parser.add_argument("--her-n-samples", type=int, default=16)
     parser.add_argument("--her-goal-selection", type=str, default="future")
+    parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--wandb-run-name", type=str, default=None)
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "learning_machines" / "src"))
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "robobo_interface" / "src"))
 
-    import os
     os.environ["COPPELIA_SIM_PORT"] = str(args.port)
-
-    from stable_baselines3 import SAC
-    from stable_baselines3.her import HerReplayBuffer
-    from stable_baselines3.common.callbacks import CheckpointCallback
-    from stable_baselines3.common.monitor import Monitor
 
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     log_dir = checkpoint_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    run_name = args.wandb_run_name or f"sac-her-{datetime.datetime.now().strftime('%m%d-%H%M%S')}"
+
+    wandb_run = None
+    if not args.no_wandb:
+        import wandb
+        wandb_run = wandb.init(
+            project="learning-machines",
+            entity="Learningmachine",
+            name=run_name,
+            config=vars(args),
+            sync_tensorboard=True,
+            resume="allow",
+        )
+
+    from stable_baselines3 import SAC
+    from stable_baselines3.her import HerReplayBuffer
+    from stable_baselines3.common.callbacks import CheckpointCallback
+    from stable_baselines3.common.monitor import Monitor
 
     model_path = checkpoint_dir / "sac_her_latest"
     buffer_path = checkpoint_dir / "replay_buffer.pkl"
@@ -218,6 +232,8 @@ def main():
         model.save_replay_buffer(str(buffer_path))
         print(f"Saved model to {model_path}")
         print(f"Saved buffer to {buffer_path}")
+        if wandb_run is not None:
+            wandb_run.finish()
         env.close()
 
 
