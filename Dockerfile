@@ -1,41 +1,51 @@
 # syntax=docker/dockerfile:1
 FROM ros:noetic
 
-# Makking sure our ROS node has ports to connect trough.
+# Making sure our ROS node has ports to connect through.
 # These are the ports specified in `rospy.init_node()` in hardware.py
 EXPOSE 45100
 EXPOSE 45101
 
+# 1. Install system dependencies. 
+# This layer rarely changes, so it caches perfectly.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y && apt-get install -y \
     python3 python3-pip git \
-    ffmpeg libsm6 libxext6 ros-noetic-opencv-apps dos2unix
+    ffmpeg libsm6 libxext6 ros-noetic-opencv-apps dos2unix libsdl2-dev
 
-# Install dependencies.
-
-# The python3 interpreter is already being shilled by ros:noetic, so no need for a venv.
+# 2. Copy ONLY the requirements file first.
 COPY ./requirements.txt /requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r /requirements.txt && rm /requirements.txt
 
-# This cd's into a new `catkin_ws` directory anyone starting the shell will end up in.
+# 3. Install ALL Python dependencies in a single, cached step.
+# If you need to add more packages later, just add them to the end of this command.
+# Because this is above the code copy step, modifying your code won't trigger reinstalls!
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r /requirements.txt && \
+    python3 -m pip install gymnasium stable-baselines3 tensorboard tensorboardX tqdm rich && \
+    rm /requirements.txt
+
+# 4. Set the working directory.
 WORKDIR /root/catkin_ws
 
-# This copies the local catkin_ws into the docker container.
+# 5. NOW copy the actual code.
+# Any changes to your Python scripts will only invalidate the cache from this point downwards.
 COPY ./catkin_ws .
 
-# Set up the envoirement to actually run the code
+# Set up the environment to actually run the code
 COPY ./scripts/entrypoint.bash ./entrypoint.bash
 COPY ./scripts/setup.bash ./setup.bash
 
 # Convert the line endings for the Windows users,
 # calling `dos2unix` on all files ending in `.py` or `.bash`
-RUN find . -type f \( -name '*.py' -o -name '*.bash' \) -exec 'dos2unix' -l -- '{}' \; && apt-get --purge remove -y dos2unix && rm -rf /var/lib/apt/lists/*
+RUN find . -type f \( -name '*.py' -o -name '*.bash' \) -exec 'dos2unix' -l -- '{}' \; && \
+    apt-get --purge remove -y dos2unix && \
+    rm -rf /var/lib/apt/lists/*
 
 # Compile the catkin_ws.
 RUN bash -c 'source /opt/ros/noetic/setup.bash && catkin_make'
 
+# Make scripts executable
 RUN chmod -R u+x /root/catkin_ws/
 
 # Uncomment these lines and comment out the last line for debugging

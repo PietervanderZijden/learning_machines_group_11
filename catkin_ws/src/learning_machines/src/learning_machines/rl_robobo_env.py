@@ -30,7 +30,7 @@ class RoboboObstacleEnvConfig:
     progress_normalizer_m: float = 0.05
     progress_reward_scale: float = 2.0
 
-    distance_bonus_scale: float = 0.0
+    distance_bonus_scale: float = 0.1
 
     obstacle_penalty_scale: float = 0.15
     front_obstacle_penalty_scale: float = 0.25
@@ -41,10 +41,10 @@ class RoboboObstacleEnvConfig:
     alive_bonus: float = 0.01
     collision_penalty: float = 5.0
 
-    idle_penalty_scale: float = 0.15
+    idle_penalty_scale: float = 0.3
     idle_speed_threshold: float = 0.15
 
-    movement_bonus_scale: float = 0.05
+    movement_bonus_scale: float = 0.3
 
     fc_early_penalty_scale: float = 0.1
     fc_early_threshold: float = 0.15
@@ -59,10 +59,6 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
     """
     Observation:
         Dict:
-            image:
-                Grayscale camera image.
-                Shape: (1, H, W)
-                Dtype: uint8
             ir:
                 Normalized IR sensor readings: [BackL, BackR, FrontL, FrontR,
                 FrontC, FrontRR, BackC, FrontLL]
@@ -92,16 +88,17 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         self.rob = rob or SimulationRobobo()
         self.config = config or RoboboObstacleEnvConfig()
 
-        height, width = self.config.image_size
+        # height, width = self.config.image_size
 
         self.observation_space = spaces.Dict(
             {
-                "image": spaces.Box(
-                    low=0,
-                    high=255,
-                    shape=(1, height, width),
-                    dtype=np.uint8,
-                ),
+                # CAMERA UITGEZET
+                # "image": spaces.Box(
+                #     low=0,
+                #     high=255,
+                #     shape=(1, height, width),
+                #     dtype=np.uint8,
+                # ),
                 "ir": spaces.Box(
                     low=0.0,
                     high=1.0,
@@ -205,7 +202,8 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
 
     def _get_obs(self) -> dict[str, np.ndarray]:
         return {
-            "image": self._read_grayscale_image(),
+            # CAMERA UITGEZET
+            # "image": self._read_grayscale_image(),
             "ir": self._read_normalized_irs(),
         }
 

@@ -43,15 +43,15 @@ def _make_fresh_model(env: Monitor, policy_kwargs: dict) -> SAC:
     return SAC(
         policy="MultiInputPolicy",
         env=env,
-        policy_kwargs=policy_kwargs,
+        #policy_kwargs=policy_kwargs,
         learning_rate=3e-4,
         buffer_size=100_000,
         learning_starts=2_000,
         batch_size=128,
         tau=0.005,
         gamma=0.99,
-        train_freq=(1, "step"),
-        gradient_steps=1,
+        train_freq=(16, "step"),
+        gradient_steps=4,
         ent_coef="auto",
         target_update_interval=1,
         verbose=1,
@@ -191,7 +191,7 @@ def make_env(
 
 
 def main(
-    total_timesteps: int = 300_000,
+    total_timesteps: int = 100_000,
     wandb_project: str = "learning-machines",
     wandb_entity: str | None = None,
     wandb_mode: str = "online",

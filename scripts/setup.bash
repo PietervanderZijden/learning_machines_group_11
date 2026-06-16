@@ -9,5 +9,6 @@ export ROS_MASTER_URI="http://localhost:11311"
 #    hostname -I | awk '{print $1}'
 # macOS:
 #    ipconfig getifaddr en0
-export COPPELIA_SIM_IP="10.15.2.224"
+export COPPELIA_SIM_IP="host.docker.internal"
+
  
