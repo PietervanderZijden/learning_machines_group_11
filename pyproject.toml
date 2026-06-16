@@ -17,6 +17,7 @@ dependencies = [
     "torchvision>=0.27.0",
     "wandb>=0.19",
     "pandas>=2.2",
+    "sb3-contrib>=2.9.0",
 ]
 
 [[tool.uv.index]]
