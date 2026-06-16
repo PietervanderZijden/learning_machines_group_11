@@ -154,7 +154,7 @@ class RoboboCompactEnv(gym.Env):
             self._randomize_food_positions()
 
         self.rob.play_simulation()
-        time.sleep(self.config.reset_settle_time)
+        self.rob.sleep(self.config.reset_settle_time)
 
         self._fix_lifted_food()
 

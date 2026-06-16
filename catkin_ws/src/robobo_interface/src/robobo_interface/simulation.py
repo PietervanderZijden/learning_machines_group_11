@@ -100,7 +100,7 @@ class SimulationRobobo(IRobobo):
 
         self._initialise_handles()
         self._initialise_fast_handles()
-        self._stepping_enabled = False
+        self._stepping_enabled = True
         self._logger(f"""Connected to remote CoppeliaSim API server at port {api_port}
             Connected to robot: {self._identifier}""")
 
@@ -370,13 +370,18 @@ class SimulationRobobo(IRobobo):
             steps = max(1, math.ceil(seconds / dt))
             for _ in range(steps):
                 if not self.is_running():
-                    raise RuntimeError("Cannot sleep when simulation is not running")
-                self._sim.step()
+                    return
+                try:
+                    self._sim.step()
+                except Exception:
+                    if not self.is_running():
+                        return
+                    raise
         else:
             start_time = self.get_sim_time()
             while self.get_sim_time() - start_time < seconds:
                 if not self.is_running():
-                    raise RuntimeError("Cannot sleep when simulation is not running")
+                    return
                 time.sleep(0.002)
 
     def is_blocked(self, blockid: int) -> bool:
