@@ -99,8 +99,16 @@ class RoboboCompactEnv(gym.Env):
         right_speed = float(action[1] * self.config.max_wheel_speed)
         duration_s = self.config.step_millis / 1000.0
 
-        self.rob.set_wheel_speeds(left_speed, right_speed, duration_s=duration_s)
-        self.rob.sleep(duration_s)
+        try:
+            self.rob.set_wheel_speeds(left_speed, right_speed, duration_s=duration_s)
+            self.rob.sleep(duration_s)
+        except RuntimeError:
+            if not self.rob.is_running():
+                obs = self._get_obs()
+                info = self._get_info()
+                info["simulation_stopped"] = True
+                return obs, 0.0, False, True, info
+            raise
 
         obs = self._get_obs()
         info = self._get_info()
