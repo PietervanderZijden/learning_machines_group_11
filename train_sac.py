@@ -124,7 +124,7 @@ def main():
     parser.add_argument("--her-goal-selection", type=str, default="future")
     args = parser.parse_args()
 
-    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    project_root = Path(__file__).resolve().parent
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "learning_machines" / "src"))
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "robobo_interface" / "src"))
 
@@ -163,7 +163,7 @@ def main():
     else:
         print("Starting fresh training run")
         model = SAC(
-            policy="MlpPolicy",
+            policy="MultiInputPolicy",
             env=env,
             learning_rate=args.learning_rate,
             buffer_size=args.buffer_size,
