@@ -1,3 +1,4 @@
+import math
 import os
 import signal
 import sys
@@ -91,7 +92,15 @@ class SimulationRobobo(IRobobo):
         except TimeoutError:
             self._fail_connect(api_port, ip_adress)
 
+        # Opt 8: Disable rendering for maximum speed (only works with GUI)
+        try:
+            self._sim.setBoolParam(self._sim.boolparam_display_enabled, False)
+        except Exception:
+            pass  # Headless mode has no display to disable
+
         self._initialise_handles()
+        self._initialise_fast_handles()
+        self._stepping_enabled = False
         self._logger(f"""Connected to remote CoppeliaSim API server at port {api_port}
             Connected to robot: {self._identifier}""")
 
@@ -352,14 +361,23 @@ class SimulationRobobo(IRobobo):
         return WheelPosition(*ints)
 
     def sleep(self, seconds: float) -> None:
-        """Block for a an amount of seconds.
-        How to do this depends on the kind of robot, and so is to be found here.
-        """
-        start_time = self.get_sim_time()
-        while self.get_sim_time() - start_time < seconds:
-            if not self.is_running():
-                raise RuntimeError("Cannot sleep when simulation is not running")
-            time.sleep(0.02)
+        """Block for an amount of time using simulation stepping if enabled,
+        otherwise fall back to wall-clock sleep."""
+        if not self.is_running():
+            raise RuntimeError("Cannot sleep when simulation is not running")
+        if self._stepping_enabled:
+            dt = self._sim.getSimulationTimeStep()
+            steps = max(1, math.ceil(seconds / dt))
+            for _ in range(steps):
+                if not self.is_running():
+                    raise RuntimeError("Cannot sleep when simulation is not running")
+                self._sim.step()
+        else:
+            start_time = self.get_sim_time()
+            while self.get_sim_time() - start_time < seconds:
+                if not self.is_running():
+                    raise RuntimeError("Cannot sleep when simulation is not running")
+                time.sleep(0.002)
 
     def is_blocked(self, blockid: int) -> bool:
         """See if the robot is currently "blocked", which is to say, performing an action
@@ -380,25 +398,37 @@ class SimulationRobobo(IRobobo):
     def block(self):
         """Block untill (only return once) all blocking actions are completed"""
         while any(self.is_blocked(blockid) for blockid in self._used_pids):
-            time.sleep(0.02)
+            self.sleep(0.002)
 
     def play_simulation(self):
         """Start the simulation"""
         self._sim.startSimulation()
-        while not self.is_running():
+        for _ in range(100):
+            if self.is_running():
+                return
             time.sleep(0.002)
+        if not self.is_running():
+            raise RuntimeError("Simulation failed to start")
 
     def pause_simulation(self):
         """Pause the simulation"""
         self._sim.pauseSimulation()
-        while not self.is_paused():
+        for _ in range(100):
+            if self.is_paused():
+                return
             time.sleep(0.002)
+        if not self.is_paused():
+            raise RuntimeError("Simulation failed to pause")
 
     def stop_simulation(self):
         """Stop the simulation"""
         self._sim.stopSimulation()
-        while not self.is_stopped():
+        for _ in range(100):
+            if self.is_stopped():
+                return
             time.sleep(0.002)
+        if not self.is_stopped():
+            raise RuntimeError("Simulation failed to stop")
 
     def is_stopped(self) -> bool:
         """Return wether the simulation is stopped"""
@@ -561,6 +591,59 @@ class SimulationRobobo(IRobobo):
         if ret < 0:
             raise AttributeError(f"Could not find Script of {name} in scene")
         return ret
+
+    def _initialise_fast_handles(self) -> None:
+        """Cache joint object handles for direct velocity control (RL fast path)."""
+        self._left_motor_joint = self._get_object(f"/Robobo{self._identifier}/Left_Motor")
+        self._right_motor_joint = self._get_object(f"/Robobo{self._identifier}/Right_Motor")
+
+    def _robobo_speed_to_rad_s(self, speed: float, duration_s: float) -> float:
+        """Convert Robobo -100..100 speed to rad/s for sim.setJointTargetVelocity().
+
+        Uses the cubic polynomial from the upstream Robobo Gazebo plugin
+        (move_wheels.cpp), which models the motor's actual velocity profile.
+        """
+        if speed == 0.0:
+            return 0.0
+
+        sign = 1.0 if speed > 0.0 else -1.0
+        v = abs(speed)
+
+        term1 = (
+            1.646e-06 * v**3
+            + -2.850e-03 * v**2
+            + 6.649 * v
+            + 5.114e01
+        )
+        term2 = (
+            -2.912e-04 * v**3
+            + 4.647e-02 * v**2
+            + -1.339 * v
+            + -1.225e01
+        )
+
+        velocity_deg_s = term1 + term2 / duration_s
+        velocity_rad_s = velocity_deg_s * math.pi / 180.0
+
+        return sign * velocity_rad_s
+
+    def set_wheel_speeds(self, left_speed: float, right_speed: float, duration_s: float = 0.1) -> None:
+        """Set wheel velocities, converting Robobo -100..100 units to rad/s.
+
+        Args:
+            left_speed: Left wheel speed in Robobo units (-100 to 100).
+            right_speed: Right wheel speed in Robobo units (-100 to 100).
+            duration_s: Action duration in seconds (default 0.1 for 100ms steps).
+        """
+        left_vel = self._robobo_speed_to_rad_s(left_speed, duration_s)
+        right_vel = self._robobo_speed_to_rad_s(right_speed, duration_s)
+        self._sim.setJointTargetVelocity(self._left_motor_joint, left_vel)
+        self._sim.setJointTargetVelocity(self._right_motor_joint, right_vel)
+
+    def step_simulation(self, steps: int = 1) -> None:
+        """Advance simulation by exactly N timesteps. No polling, no sleep."""
+        for _ in range(steps):
+            self._sim.step()
 
     def _fail_connect(self, api_port: int, ip_adress: str) -> NoReturn:
         self._logger("""CoppeliaSim Api Connection Error

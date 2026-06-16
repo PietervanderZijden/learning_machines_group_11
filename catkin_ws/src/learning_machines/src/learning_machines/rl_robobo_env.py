@@ -16,10 +16,10 @@ BACK_IR_INDICES = [0, 1, 6]
 
 @dataclass
 class RoboboObstacleEnvConfig:
-    image_size: tuple[int, int] = (84, 84)
+    image_size: tuple[int, int] = (64, 64)
 
     max_wheel_speed: int = 100
-    step_millis: int = 200
+    step_millis: int = 400
 
     max_episode_steps: int = 500
 
@@ -38,6 +38,8 @@ class RoboboObstacleEnvConfig:
     action_penalty_scale: float = 0.0
 
     turning_penalty_scale: float = 0.02
+    spin_penalty_scale: float = 0.08
+
     alive_bonus: float = 0.01
     collision_penalty: float = 5.0
 
@@ -46,10 +48,19 @@ class RoboboObstacleEnvConfig:
 
     movement_bonus_scale: float = 0.05
 
+    low_displacement_penalty_scale: float = 0.08
+    low_displacement_threshold_m: float = 0.01
+
+    near_start_penalty_scale: float = 0.02
+    near_start_distance_threshold_m: float = 0.10
+    near_start_grace_steps: int = 20
+
     fc_early_penalty_scale: float = 0.1
     fc_early_threshold: float = 0.15
 
     reset_settle_seconds: float = 0.25
+
+    camera_update_interval: int = 1
 
     start_position: Optional[Position] = None
     start_orientation: Optional[Orientation] = None
@@ -92,6 +103,18 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         self.rob = rob or SimulationRobobo()
         self.config = config or RoboboObstacleEnvConfig()
 
+        if self.rob.is_stopped():
+            self.rob.play_simulation()
+
+        self.rob._sim.setStepping(True)
+        self.rob._stepping_enabled = True
+
+        self._sim_dt = float(self.rob._sim.getSimulationTimeStep())
+        self._steps_per_action = max(
+            1,
+            round(self.config.step_millis / 1000.0 / self._sim_dt),
+        )
+
         height, width = self.config.image_size
 
         self.observation_space = spaces.Dict(
@@ -130,7 +153,10 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
 
         self._episode_start_position = self._initial_position
         self._previous_distance_from_start = 0.0
+        self._best_distance_from_start = 0.0
+        self._previous_position = self._initial_position
         self._step_count = 0
+        self._last_image: Optional[np.ndarray] = None
 
     def reset(
         self,
@@ -144,6 +170,8 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
 
         self._episode_start_position = self.rob.get_position()
         self._previous_distance_from_start = 0.0
+        self._best_distance_from_start = 0.0
+        self._previous_position = self._episode_start_position
         self._step_count = 0
 
         obs = self._get_obs()
@@ -160,14 +188,14 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         action = np.asarray(action, dtype=np.float32)
         action = np.clip(action, -1.0, 1.0)
 
-        left_speed = int(action[0] * self.config.max_wheel_speed)
-        right_speed = int(action[1] * self.config.max_wheel_speed)
+        left_speed = float(action[0] * self.config.max_wheel_speed)
+        right_speed = float(action[1] * self.config.max_wheel_speed)
 
-        self.rob.move_blocking(
-            left_speed,
-            right_speed,
-            self.config.step_millis,
+        self.rob.set_wheel_speeds(
+            left_speed, right_speed,
+            duration_s=self.config.step_millis / 1000.0,
         )
+        self.rob.step_simulation(self._steps_per_action)
 
         obs = self._get_obs()
         info = self._get_info(obs)
@@ -175,11 +203,14 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         terminated = bool(info["collision"])
         truncated = self._step_count >= self.config.max_episode_steps
 
+        cached_position = Position(info["x"], info["y"], info["z"])
+
         reward = self._compute_reward(
             action=action,
             info=info,
             terminated=terminated,
             obs=obs,
+            current_position=cached_position,
         )
 
         info["reward"] = reward
@@ -187,6 +218,7 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         info["right_speed"] = right_speed
         info["action_left"] = float(action[0])
         info["action_right"] = float(action[1])
+        info["wheel_difference"] = float(abs(action[0] - action[1]))
 
         return obs, reward, terminated, truncated, info
 
@@ -195,13 +227,26 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             self.rob.stop_simulation()
 
     def _reset_simulation(self) -> None:
-        if not self.rob.is_stopped():
-            self.rob.stop_simulation()
+        """Reset without stopping/starting the simulation."""
+        self.rob.set_wheel_speeds(0.0, 0.0)
+        self.rob.set_position(self._initial_position, self._initial_orientation)
 
-        self.rob.play_simulation()
-        self.rob.sleep(self.config.reset_settle_seconds)
+        try:
+            self.rob._sim.resetDynamicObject(self.rob._robobo)
+        except Exception:
+            pass
 
-        self.rob.set_phone_tilt_blocking(100, 100)
+        try:
+            self.rob._sim.resetDynamicObject(self.rob._left_motor_joint)
+            self.rob._sim.resetDynamicObject(self.rob._right_motor_joint)
+        except Exception:
+            pass
+
+        self.rob._used_pids.clear()
+        self._last_image = None
+
+        for _ in range(3):
+            self.rob.step_simulation(1)
 
     def _get_obs(self) -> dict[str, np.ndarray]:
         return {
@@ -210,6 +255,13 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         }
 
     def _read_grayscale_image(self) -> np.ndarray:
+        if (
+            self._last_image is not None
+            and self.config.camera_update_interval > 1
+            and self._step_count % self.config.camera_update_interval != 0
+        ):
+            return self._last_image
+
         image_bgr = self.rob.read_image_front()
 
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
@@ -219,7 +271,8 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             interpolation=cv2.INTER_AREA,
         )
 
-        return gray[None, :, :].astype(np.uint8)
+        self._last_image = gray[None, :, :].astype(np.uint8)
+        return self._last_image
 
     def _read_normalized_irs(self) -> np.ndarray:
         raw_irs = self.rob.read_irs()
@@ -254,6 +307,10 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             position,
         )
 
+        step_displacement = self._xy_distance(
+            self._previous_position,
+            position,
+        )
         ir = obs["ir"]
 
         front_obstacle_closeness = float(np.max(ir[FRONT_IR_INDICES]))
@@ -267,6 +324,7 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             "y": float(position.y),
             "z": float(position.z),
             "distance_from_start": float(distance_from_start),
+            "step_displacement": float(step_displacement),
             "front_obstacle_closeness": front_obstacle_closeness,
             "back_obstacle_closeness": back_obstacle_closeness,
             "max_obstacle_closeness": max_obstacle_closeness,
@@ -275,16 +333,34 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         }
 
     def _compute_reward(
-        self, action: np.ndarray, info: dict[str, Any], terminated: bool, obs
+        self,
+        action: np.ndarray,
+        info: dict[str, Any],
+        terminated: bool,
+        obs: dict[str, np.ndarray],
+        current_position: Optional[Position] = None,
     ) -> float:
+        if current_position is None:
+            current_position = self.rob.get_position()
         current_distance = float(info["distance_from_start"])
+        step_displacement = float(info["step_displacement"])
 
-        progress = current_distance - self._previous_distance_from_start
+        record_progress = max(
+            0.0,
+            current_distance - self._best_distance_from_start,
+        )
+
+        self._best_distance_from_start = max(
+            self._best_distance_from_start,
+            current_distance,
+        )
+
         self._previous_distance_from_start = current_distance
+        self._previous_position = current_position
 
         normalized_progress = np.clip(
-            progress / self.config.progress_normalizer_m,
-            -1.0,
+            record_progress / self.config.progress_normalizer_m,
+            0.0,
             1.0,
         )
 
@@ -314,27 +390,44 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
                 fc_value - self.config.fc_early_threshold
             )
 
-        action_penalty = self.config.action_penalty_scale * float(
-            np.mean(np.abs(action))
-        )
+        mean_abs_action = float(np.mean(np.abs(action)))
+
+        action_penalty = self.config.action_penalty_scale * mean_abs_action
+
+        wheel_difference = float(abs(action[0] - action[1]))
+        spin_penalty = self.config.spin_penalty_scale * wheel_difference
 
         turning_penalty = 0.0
         if action[0] * action[1] < 0.0:
-            turning_penalty = self.config.turning_penalty_scale
+            turning_penalty = self.config.turning_penalty_scale * wheel_difference
 
-        mean_abs_action = float(np.mean(np.abs(action)))
         idle_penalty = 0.0
         if mean_abs_action < self.config.idle_speed_threshold:
             idle_penalty = self.config.idle_penalty_scale * (
                 1.0 - mean_abs_action / self.config.idle_speed_threshold
             )
 
-        forward_component = float((action[0] + action[1]) / 2.0)
-        movement_bonus = (
-            self.config.movement_bonus_scale * forward_component
-            if forward_component > 0.0
-            else 0.0
-        )
+        low_displacement_penalty = 0.0
+        if step_displacement < self.config.low_displacement_threshold_m:
+            low_displacement_penalty = self.config.low_displacement_penalty_scale * (
+                1.0 - step_displacement / self.config.low_displacement_threshold_m
+            )
+
+        near_start_penalty = 0.0
+        if (
+            self._step_count > self.config.near_start_grace_steps
+            and current_distance < self.config.near_start_distance_threshold_m
+        ):
+            near_start_penalty = self.config.near_start_penalty_scale * (
+                1.0 - current_distance / self.config.near_start_distance_threshold_m
+            )
+
+        forward_component = float(min(action[0], action[1]))
+
+        if forward_component > 0.0:
+            movement_bonus = self.config.movement_bonus_scale * forward_component
+        else:
+            movement_bonus = self.config.movement_bonus_scale * forward_component * 2.0
 
         reward = (
             progress_reward
@@ -345,8 +438,11 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             - front_obstacle_penalty
             - fc_early_penalty
             - idle_penalty
+            - low_displacement_penalty
+            - near_start_penalty
             - action_penalty
             - turning_penalty
+            - spin_penalty
         )
 
         if terminated:
