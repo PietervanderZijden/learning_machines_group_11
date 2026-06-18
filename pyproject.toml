@@ -18,6 +18,7 @@ dependencies = [
     "wandb>=0.19",
     "pandas>=2.2",
     "sb3-contrib>=2.9.0",
+    "pytest>=9.1.0",
 ]
 
 [[tool.uv.index]]

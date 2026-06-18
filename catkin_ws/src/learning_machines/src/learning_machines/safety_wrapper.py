@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import gymnasium as gym
 import numpy as np
 
+from learning_machines.transfer import PreActionSafetyFilter, SafetyConfig
+
 
 class SafetyWrapper(gym.Wrapper):
-    """Intercepts actions to prevent wall collisions via IR sensor monitoring.
-
-    When front IR sensors exceed danger_threshold, backs away.
-    When critical_threshold exceeded, full stop + spin.
-    """
+    """Compatibility wrapper implementing safety before the action is executed."""
 
     def __init__(
         self,
@@ -26,20 +22,24 @@ class SafetyWrapper(gym.Wrapper):
         self.front_ir_indices = front_ir_indices or [2, 3, 4, 5, 7]
         self.danger_threshold = danger_threshold
         self.critical_threshold = critical_threshold
+        self._latest_ir = np.zeros(8, dtype=np.float32)
+        self._filter = PreActionSafetyFilter(SafetyConfig(
+            warning_threshold=danger_threshold,
+            critical_threshold=critical_threshold,
+            front_indices=tuple(self.front_ir_indices),
+        ))
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        if isinstance(obs, dict) and "ir" in obs:
+            self._latest_ir = np.asarray(obs["ir"], dtype=np.float32).copy()
+        return obs, info
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-
-        ir = obs["ir"] if isinstance(obs, dict) and "ir" in obs else None
-        if ir is not None:
-            front_vals = [ir[i] for i in self.front_ir_indices if i < len(ir)]
-            max_front = max(front_vals) if front_vals else 0.0
-
-            if max_front >= self.critical_threshold:
-                action = np.array([0.7, -0.7], dtype=np.float32) * 0.5
-                info["safety_override"] = "spin"
-            elif max_front >= self.danger_threshold:
-                action = np.array([-0.5, -0.5], dtype=np.float32)
-                info["safety_override"] = "back_away"
-
+        filtered, safety_event = self._filter.filter(action, self._latest_ir)
+        obs, reward, terminated, truncated, info = self.env.step(filtered)
+        if isinstance(obs, dict) and "ir" in obs:
+            self._latest_ir = np.asarray(obs["ir"], dtype=np.float32).copy()
+        if safety_event is not None:
+            info["wrapper_safety_override"] = safety_event
         return obs, reward, terminated, truncated, info

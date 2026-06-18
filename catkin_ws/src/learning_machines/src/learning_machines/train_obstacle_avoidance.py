@@ -49,7 +49,7 @@ def _make_fresh_model(env: Monitor, policy_kwargs: dict) -> SAC:
         learning_starts=2_000,
         batch_size=128,
         tau=0.005,
-        gamma=0.99,
+        gamma=0.9801,
         train_freq=(1, "step"),
         gradient_steps=1,
         ent_coef="auto",
@@ -226,7 +226,7 @@ def main(
     config = RoboboObstacleEnvConfig(
         image_size=(100, 100),
         max_wheel_speed=100,
-        step_millis=200,
+        step_millis=400,
         max_episode_steps=500,
         max_ir_value=400.0,
         obstacle_penalty_threshold=0.15,

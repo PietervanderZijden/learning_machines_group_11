@@ -1,9 +1,0 @@
-#running docker 
-./scripts/run.sh --{simulation or hardware} 
-
-#if running in hardware change ./scripts/setup.bash -> ip adresses local and add phone ip adress
-
-#running coppelia sim
-./scripts/start_coppelia_sim.zsh ./scenes/{Select scene}
-
-

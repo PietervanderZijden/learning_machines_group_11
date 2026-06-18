@@ -2,6 +2,7 @@
 
 Processes (observation, action, reward) sequences with causal masking.
 Learns to predict next observation, reward, and terminal from past context.
+Observations are symlog-transformed before embedding.
 """
 from __future__ import annotations
 import math
@@ -11,9 +12,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def symlog(x: torch.Tensor) -> torch.Tensor:
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+
+def symexp(x: torch.Tensor) -> torch.Tensor:
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
+
+
 class CausalTransformer(nn.Module):
     """Causal transformer for sequence modeling of (obs, action, reward) tokens.
 
+    Each token is the sum of obs, action, and reward embeddings.
     Uses causal self-attention mask so each position can only attend to
     past and current positions (no future information leakage).
     """
@@ -26,13 +36,17 @@ class CausalTransformer(nn.Module):
         ff_dim: int = 1024,
         dropout: float = 0.1,
         context_length: int = 64,
+        obs_dim: int = 12,
+        act_dim: int = 2,
     ):
         super().__init__()
         self.d_model = d_model
         self.context_length = context_length
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
 
-        self.obs_embed = nn.Linear(12, d_model)
-        self.act_embed = nn.Linear(2, d_model)
+        self.obs_embed = nn.Linear(obs_dim, d_model)
+        self.act_embed = nn.Linear(act_dim, d_model)
         self.rew_embed = nn.Linear(1, d_model)
 
         self.pos_embed = nn.Embedding(context_length + 1, d_model)
@@ -52,7 +66,7 @@ class CausalTransformer(nn.Module):
             num_layers=n_layers,
         )
 
-        self.obs_head = nn.Linear(d_model, 12)
+        self.obs_head = nn.Linear(d_model, obs_dim)
         self.rew_head = nn.Linear(d_model, 1)
         self.done_head = nn.Linear(d_model, 1)
 
@@ -74,15 +88,15 @@ class CausalTransformer(nn.Module):
         """Forward pass for sequence modeling.
 
         Args:
-            observations: (B, T+1, obs_dim)
+            observations: (B, T+1, obs_dim) — raw observations
             actions: (B, T, act_dim)
-            rewards: (B, T, 1)
+            rewards: (B, T) or (B, T, 1)
             mask: (B, T) — 1 for valid, 0 for padded
 
         Returns:
             dict with predictions for positions 1..T
-            obs_pred: (B, T, obs_dim) — next observation prediction
-            rew_pred: (B, T, 1) — reward prediction
+            obs_pred: (B, T, obs_dim) — next observation prediction (symlog space)
+            rew_pred: (B, T, 1) — reward prediction (symlog space)
             done_pred: (B, T, 1) — terminal prediction
         """
         B, Tp1, _ = observations.shape
@@ -91,13 +105,17 @@ class CausalTransformer(nn.Module):
         if rewards.dim() == 2:
             rewards = rewards.unsqueeze(-1)
 
+        # Embed observations and rewards directly (caller should apply symlog if needed)
         obs_tok = self.obs_embed(observations)
         act_tok = self.act_embed(actions)
         rew_tok = self.rew_embed(rewards)
 
+        # Build token sequence: each token includes obs + act + reward
+        # Token at position t represents transition t: (obs_t, act_t, rew_t)
+        # Final token is obs_{T} (no action/reward)
         tokens = []
         for t in range(T):
-            tokens.append(obs_tok[:, t] + act_tok[:, t])
+            tokens.append(obs_tok[:, t] + act_tok[:, t] + rew_tok[:, t])
         tokens.append(obs_tok[:, T])
         tokens = torch.stack(tokens, dim=1)
 
@@ -119,6 +137,7 @@ class CausalTransformer(nn.Module):
             src_key_padding_mask=key_padding_mask,
         )
 
+        # Predictions from positions 0..T-1 (predict next obs, current reward, done)
         pred_obs = self.obs_head(hidden[:, :T])
         pred_rew = self.rew_head(hidden[:, :T])
         pred_done = self.done_head(hidden[:, :T])
@@ -137,17 +156,21 @@ class CausalTransformer(nn.Module):
         clip_reward: bool = True,
         reward_scale: float = 10.0,
     ) -> dict[str, torch.Tensor]:
-        """Imagine future trajectories using the world model + actor.
+        """Imagine future trajectories using autoregressive causal transformer.
+
+        At each step, all previous (obs, action, reward) tokens are processed
+        through the transformer with causal masking so the model attends to
+        full history.
 
         Args:
-            initial_obs: (B, obs_dim) — starting observation
+            initial_obs: (B, obs_dim) — starting observation (caller should apply symlog/normalize)
             actor: callable that takes (obs, deterministic) → (action, log_prob)
             horizon: number of steps to imagine
             clip_reward: whether to clip rewards
             reward_scale: reward scaling factor
 
         Returns:
-            dict with imagined trajectory tensors
+            dict with imagined trajectory tensors (in raw space)
         """
         B = initial_obs.shape[0]
         device = initial_obs.device
@@ -158,9 +181,11 @@ class CausalTransformer(nn.Module):
         done_list = []
         log_prob_list = []
 
-        h_obs = initial_obs
+        token_embeddings: list[torch.Tensor] = []
 
         for t in range(horizon):
+            h_obs = obs_list[-1].detach()
+
             act, log_prob = actor(h_obs, deterministic=False)
 
             if clip_reward:
@@ -169,26 +194,43 @@ class CausalTransformer(nn.Module):
             act_list.append(act)
             log_prob_list.append(log_prob)
 
-            obs_tok = self.obs_embed(h_obs)
+            # Embed observation with symlog (model predicts in symlog space)
+            obs_symlog = symlog(h_obs)
+            obs_tok = self.obs_embed(obs_symlog)
             act_tok = self.act_embed(act)
 
-            token = obs_tok + act_tok
+            # Use predicted reward from previous step (or zero for first step)
+            if t > 0:
+                prev_rew = rew_list[-1].detach()
+                prev_rew_symlog = symlog(prev_rew)
+                rew_tok = self.rew_embed(prev_rew_symlog)
+            else:
+                rew_tok = torch.zeros(B, self.d_model, device=device)
 
-            pos = torch.arange(t, t + 1, device=device).unsqueeze(0).expand(B, -1)
-            token = token.unsqueeze(1) + self.pos_embed(pos)
-            token = self.embed_dropout(token)
+            token_embeddings.append(obs_tok + act_tok + rew_tok)
 
-            hidden = token.squeeze(1)
+            tokens = torch.stack(token_embeddings, dim=1)
+            positions = torch.arange(t + 1, device=device).unsqueeze(0).expand(B, -1)
+            tokens = tokens + self.pos_embed(positions)
+            tokens = self.embed_dropout(tokens)
 
-            h_obs = self.obs_head(hidden)
-            rew = self.rew_head(hidden)
-            done = self.done_head(hidden)
+            causal_mask = self._causal_mask[:t + 1, :t + 1].to(device)
+            hidden = self.transformer(tokens, mask=causal_mask)
+
+            last_hidden = hidden[:, -1]
+            next_obs = self.obs_head(last_hidden)  # predicts in symlog space
+            rew = self.rew_head(last_hidden)  # predicts in symlog space
+            done = self.done_head(last_hidden)
+
+            # Convert from symlog to raw space
+            next_obs_raw = symexp(next_obs)
+            rew_raw = symexp(rew)
 
             if clip_reward:
-                rew = torch.clamp(rew, -reward_scale, reward_scale)
+                rew_raw = torch.clamp(rew_raw, -reward_scale, reward_scale)
 
-            obs_list.append(h_obs)
-            rew_list.append(rew)
+            obs_list.append(next_obs_raw)
+            rew_list.append(rew_raw)
             done_list.append(done)
 
         obs_arr = torch.stack(obs_list, dim=1)

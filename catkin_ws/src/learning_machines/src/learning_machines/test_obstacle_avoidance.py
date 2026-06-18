@@ -46,7 +46,7 @@ def test(
     config = RoboboObstacleEnvConfig(
         image_size=(100, 100),
         max_wheel_speed=100,
-        step_millis=200,
+        step_millis=400,
         max_episode_steps=500,
         max_ir_value=400.0,
         obstacle_penalty_threshold=0.15,

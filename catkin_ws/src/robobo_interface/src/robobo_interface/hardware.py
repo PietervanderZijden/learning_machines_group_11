@@ -248,6 +248,23 @@ class HardwareRobobo(IRobobo):
         )
         return blockid
 
+    def set_wheel_speeds(
+        self, left_speed: float, right_speed: float, duration_s: float = 0.4
+    ) -> None:
+        """Continuously update wheel commands without an intermediate stop.
+
+        Hardware movement services cancel the previous command when a new one
+        arrives. A command duration longer than the control period therefore
+        holds motion across inference/sensor acquisition while the next command
+        replaces it seamlessly.
+        """
+        hold_millis = max(200, int(round(duration_s * 3000.0)))
+        self.move(
+            int(numpy.clip(round(left_speed), -100, 100)),
+            int(numpy.clip(round(right_speed), -100, 100)),
+            hold_millis,
+        )
+
     def reset_wheels(self) -> None:
         """Allows to reset the wheel encoder positions to 0.
         After calling this both encoders reset, making the current position the new reference
