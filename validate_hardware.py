@@ -14,6 +14,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -202,6 +203,64 @@ def _check_ros_environment() -> dict[str, str]:
     }
 
 
+def _probe_endpoint(host: str, port: int, timeout: float = 3.0) -> dict[str, Any]:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return {"reachable": True}
+    except OSError as exc:
+        return {"reachable": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _topic_endpoint_diagnostics(topic: str) -> dict[str, Any]:
+    """Resolve publisher XML-RPC and TCPROS endpoints through the ROS master."""
+    master_uri = os.environ["ROS_MASTER_URI"]
+    caller = "/robobo_hardware_validation_diagnostics"
+    report: dict[str, Any] = {"topic": topic, "publishers": []}
+    try:
+        master = xmlrpc.client.ServerProxy(master_uri)
+        code, message, state = master.getSystemState(caller)
+        if code != 1:
+            return report | {"master_error": message}
+        published_topics, _subscribed_topics, _services = state
+        publisher_nodes = next(
+            (nodes for name, nodes in published_topics if name == topic), []
+        )
+        for node in publisher_nodes:
+            entry: dict[str, Any] = {"node": node}
+            try:
+                code, message, node_uri = master.lookupNode(caller, node)
+                if code != 1:
+                    entry["lookup_error"] = message
+                    report["publishers"].append(entry)
+                    continue
+                entry["node_uri"] = node_uri
+                parsed = urlparse(node_uri)
+                if parsed.hostname and parsed.port:
+                    entry["node_xmlrpc"] = _probe_endpoint(
+                        parsed.hostname, parsed.port
+                    )
+                code, message, protocol = xmlrpc.client.ServerProxy(
+                    node_uri
+                ).requestTopic(caller, topic, [["TCPROS"]])
+                if code != 1:
+                    entry["request_topic_error"] = message
+                elif protocol and protocol[0] == "TCPROS":
+                    host, port = str(protocol[1]), int(protocol[2])
+                    entry["tcpros"] = {
+                        "host": host,
+                        "port": port,
+                        **_probe_endpoint(host, port),
+                    }
+                else:
+                    entry["protocol_error"] = repr(protocol)
+            except Exception as exc:
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+            report["publishers"].append(entry)
+    except Exception as exc:
+        report["master_error"] = f"{type(exc).__name__}: {exc}"
+    return report
+
+
 def _wait_for_ros(timeout: float, include_camera: bool) -> dict[str, Any]:
     import rospy
     from robobo_msgs.msg import IRs
@@ -214,14 +273,31 @@ def _wait_for_ros(timeout: float, include_camera: bool) -> dict[str, Any]:
         result["services"][service] = {"latency_seconds": time.monotonic() - started}
 
     started = time.monotonic()
-    rospy.wait_for_message("robot/irs", IRs, timeout=timeout)
-    result["topics"]["robot/irs"] = {"latency_seconds": time.monotonic() - started}
+    try:
+        rospy.wait_for_message("/robot/irs", IRs, timeout=timeout)
+    except rospy.ROSException as exc:
+        diagnostics = _topic_endpoint_diagnostics("/robot/irs")
+        raise RuntimeError(
+            "Timed out waiting for /robot/irs. ROS endpoint diagnostics:\n"
+            + json.dumps(diagnostics, indent=2)
+        ) from exc
+    result["topics"]["/robot/irs"] = {"latency_seconds": time.monotonic() - started}
     if include_camera:
         started = time.monotonic()
-        message = rospy.wait_for_message(
-            "robot/camera/image/compressed", CompressedImage, timeout=timeout
-        )
-        result["topics"]["robot/camera/image/compressed"] = {
+        try:
+            message = rospy.wait_for_message(
+                "/robot/camera/image/compressed", CompressedImage, timeout=timeout
+            )
+        except rospy.ROSException as exc:
+            diagnostics = _topic_endpoint_diagnostics(
+                "/robot/camera/image/compressed"
+            )
+            raise RuntimeError(
+                "Timed out waiting for /robot/camera/image/compressed. "
+                "ROS endpoint diagnostics:\n"
+                + json.dumps(diagnostics, indent=2)
+            ) from exc
+        result["topics"]["/robot/camera/image/compressed"] = {
             "latency_seconds": time.monotonic() - started
         }
         result["camera_message"] = message
