@@ -98,6 +98,43 @@ to W&B with `--wandb-project`.
 
 ## Hardware deployment
 
+Before deploying a policy, run the read-only hardware diagnostics:
+
+```bash
+./run_hardware_validation.sh
+```
+
+The launcher requires `ROS_MASTER_URI` and `ROS_IP` (or `ROS_HOSTNAME`) to be
+set by `scripts/setup.bash` or the container environment. It checks ROS
+services, IR sensors, camera, phone pose, IMU, wheel encoders, and battery
+readings, then saves a timestamped report and camera frame under
+`hardware_logs/diagnostics/`. It does not move the robot by default.
+
+Create the measured IR profile while the robot remains stationary:
+
+```bash
+./run_hardware_validation.sh --calibrate-ir
+```
+
+Follow every placement prompt; obstacles must exercise all eight sensor
+directions. Inspect `ir_calibration_summary.json` for weak sensor spans before
+using the generated `hardware.json`.
+
+Phone tilt actuation is opt-in:
+
+```bash
+./run_hardware_validation.sh --test-tilt --tilt-position 100
+```
+
+Only test motors with the robot physically raised and every wheel clear:
+
+```bash
+./run_hardware_validation.sh --test-wheels --wheels-raised
+```
+
+The wheel test requires typing `WHEELS RAISED`, caps speed at 20, caps each
+command at 500 ms, and sends stop commands before, between, and after tests.
+
 ```bash
 ./run_hardware_deploy.sh \
   sac \

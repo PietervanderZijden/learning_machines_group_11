@@ -22,7 +22,14 @@ def robust_profile(samples: dict[str, np.ndarray], name: str, source: str) -> Ca
     if "open_space" not in samples or "near_obstacle" not in samples:
         raise ValueError("samples require open_space and near_obstacle phases")
     free = np.percentile(samples["open_space"], 50, axis=0)
-    near = np.percentile(samples["near_obstacle"], 90, axis=0)
+    near_median = np.percentile(samples["near_obstacle"], 50, axis=0)
+    # Use the obstacle-side percentile. Some hardware/firmware combinations
+    # report smaller values near an obstacle, so p90 is not universally valid.
+    near = np.where(
+        near_median >= free,
+        np.percentile(samples["near_obstacle"], 90, axis=0),
+        np.percentile(samples["near_obstacle"], 10, axis=0),
+    )
     sensors = []
     for i in range(8):
         polarity = 1 if near[i] >= free[i] else -1
