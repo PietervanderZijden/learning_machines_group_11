@@ -109,6 +109,9 @@ set by `scripts/setup.bash` or the container environment. It checks ROS
 services, IR sensors, camera, phone pose, IMU, wheel encoders, and battery
 readings, then saves a timestamped report and camera frame under
 `hardware_logs/diagnostics/`. It does not move the robot by default.
+On Linux it uses host networking. On macOS Docker Desktop it publishes the
+fixed ROS callback ports `45100` and `45101`; `ROS_IP` must remain the Mac's
+LAN address, not a container address.
 
 Create the measured IR profile while the robot remains stationary:
 

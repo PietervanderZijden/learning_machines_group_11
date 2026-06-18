@@ -9,6 +9,7 @@ import os
 import socket
 import sys
 import time
+import xmlrpc.client
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -179,6 +180,21 @@ def _check_ros_environment() -> dict[str, str]:
             "Set ROS_IP to this computer's robot-network IP. "
             "The robot must be able to connect back to it."
         )
+    previous_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(5.0)
+    try:
+        response = xmlrpc.client.ServerProxy(master).getUri(
+            "/robobo_hardware_validation_preflight"
+        )
+        if not isinstance(response, (list, tuple)) or response[0] != 1:
+            raise RuntimeError(f"ROS master returned an invalid response: {response!r}")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot contact the ROS master from this process at {master}: {exc}. "
+            "On macOS, verify Docker Desktop can access the robot's LAN."
+        ) from exc
+    finally:
+        socket.setdefaulttimeout(previous_timeout)
     return {
         "ROS_MASTER_URI": master,
         "ROS_IP_OR_HOSTNAME": advertised,

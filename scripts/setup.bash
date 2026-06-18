@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# ROS_MASTER_URI points to localhost because SSH tunnels forward traffic
-# through the iPad (100.64.0.7) to the robot (10.15.2.56).
-# ROS_IP is the iPad's local IP — the robot connects back to this address,
-# and the reverse SSH tunnel routes it to this host.
-export ROS_MASTER_URI="http://localhost:11311"
+
+# Physical Robobo ROS master.
+export ROS_MASTER_URI="http://10.15.2.56:11311"
+
+# This computer's address on the same network as the Robobo. ROS advertises
+# this address so the robot can open topic connections back to this process.
 export ROS_IP="10.15.2.253"
-# You want your local IP, usually starting with 192.168, following RFC1918
-# Windows powershell:
-#    (Get-NetIPAddress | Where-Object { $_.AddressState -eq "Preferred" -and $_.ValidLifetime -lt "24:00:00" }).IPAddress
-# linux:
-#    hostname -I | awk '{print $1}'
-# macOS:
-#    ipconfig getifaddr en0
+
+# Fixed callback ports used by HardwareRobobo. Docker publishes these ports on
+# macOS; Linux uses host networking.
+export ROS_XMLRPC_PORT="45100"
+export ROS_TCPROS_PORT="45101"
+
+# Simulation only. This does not affect physical-hardware validation.
 export COPPELIA_SIM_IP="10.15.2.224"
  
