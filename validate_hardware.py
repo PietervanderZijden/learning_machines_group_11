@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 import xmlrpc.client
 from dataclasses import asdict, is_dataclass
@@ -222,6 +223,11 @@ def _topic_endpoint_diagnostics(topic: str) -> dict[str, Any]:
         if code != 1:
             return report | {"master_error": message}
         published_topics, _subscribed_topics, _services = state
+        code, message, topic_types = master.getPublishedTopics(caller, "")
+        if code == 1:
+            report["declared_type"] = next(
+                (type_name for name, type_name in topic_types if name == topic), None
+            )
         publisher_nodes = next(
             (nodes for name, nodes in published_topics if name == topic), []
         )
@@ -261,6 +267,36 @@ def _topic_endpoint_diagnostics(topic: str) -> dict[str, Any]:
     return report
 
 
+def _wait_for_topic_message(topic: str, message_type: Any, timeout: float) -> tuple[Any, int]:
+    import rospy
+
+    received = threading.Event()
+    holder: list[Any] = []
+
+    def callback(message: Any) -> None:
+        if not holder:
+            holder.append(message)
+            received.set()
+
+    subscriber = rospy.Subscriber(topic, message_type, callback, queue_size=1)
+    deadline = time.monotonic() + timeout
+    maximum_connections = 0
+    try:
+        while not received.is_set() and time.monotonic() < deadline:
+            maximum_connections = max(
+                maximum_connections, subscriber.get_num_connections()
+            )
+            received.wait(min(0.1, max(0.0, deadline - time.monotonic())))
+        if not holder:
+            raise TimeoutError(
+                f"no message after {timeout:.1f}s; "
+                f"subscriber connections={maximum_connections}"
+            )
+        return holder[0], maximum_connections
+    finally:
+        subscriber.unregister()
+
+
 def _wait_for_ros(timeout: float, include_camera: bool) -> dict[str, Any]:
     import rospy
     from robobo_msgs.msg import IRs
@@ -273,32 +309,42 @@ def _wait_for_ros(timeout: float, include_camera: bool) -> dict[str, Any]:
         result["services"][service] = {"latency_seconds": time.monotonic() - started}
 
     started = time.monotonic()
+    print(
+        "Waiting for /robot/irs. Move an object past the front and rear sensors "
+        "because Robobo sensor topics may publish only when readings change."
+    )
     try:
-        rospy.wait_for_message("/robot/irs", IRs, timeout=timeout)
-    except rospy.ROSException as exc:
+        _message, connections = _wait_for_topic_message("/robot/irs", IRs, timeout)
+    except TimeoutError as exc:
         diagnostics = _topic_endpoint_diagnostics("/robot/irs")
+        diagnostics["subscriber_error"] = str(exc)
         raise RuntimeError(
             "Timed out waiting for /robot/irs. ROS endpoint diagnostics:\n"
             + json.dumps(diagnostics, indent=2)
         ) from exc
-    result["topics"]["/robot/irs"] = {"latency_seconds": time.monotonic() - started}
+    result["topics"]["/robot/irs"] = {
+        "latency_seconds": time.monotonic() - started,
+        "subscriber_connections": connections,
+    }
     if include_camera:
         started = time.monotonic()
         try:
-            message = rospy.wait_for_message(
-                "/robot/camera/image/compressed", CompressedImage, timeout=timeout
+            message, connections = _wait_for_topic_message(
+                "/robot/camera/image/compressed", CompressedImage, timeout
             )
-        except rospy.ROSException as exc:
+        except TimeoutError as exc:
             diagnostics = _topic_endpoint_diagnostics(
                 "/robot/camera/image/compressed"
             )
+            diagnostics["subscriber_error"] = str(exc)
             raise RuntimeError(
                 "Timed out waiting for /robot/camera/image/compressed. "
                 "ROS endpoint diagnostics:\n"
                 + json.dumps(diagnostics, indent=2)
             ) from exc
         result["topics"]["/robot/camera/image/compressed"] = {
-            "latency_seconds": time.monotonic() - started
+            "latency_seconds": time.monotonic() - started,
+            "subscriber_connections": connections,
         }
         result["camera_message"] = message
     return result
