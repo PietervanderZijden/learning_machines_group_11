@@ -19,7 +19,6 @@ docker run -it --rm \
         source /opt/ros/noetic/setup.bash
         source /root/catkin_ws/devel/setup.bash
         source /root/catkin_ws/setup.bash
-        export ROS_IP="${ROS_IP:-${COPPELIA_SIM_IP:-}}"
         export PYTHONPATH="/workspace/catkin_ws/src/learning_machines/src:/workspace/catkin_ws/src/robobo_interface/src:${PYTHONPATH:-}"
         cd /workspace
         exec python3 validate_hardware.py "$@"
