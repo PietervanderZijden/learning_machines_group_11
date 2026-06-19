@@ -23,10 +23,18 @@ for path in "$CHECKPOINT" "$CALIBRATION" "$MANIFEST"; do
     fi
 done
 
+docker_ros_env=()
+for name in ROS_MASTER_URI ROS_IP ROS_HOSTNAME ROS_XMLRPC_PORT ROS_TCPROS_PORT; do
+    if [[ -n "${!name:-}" ]]; then
+        docker_ros_env+=(-e "$name")
+    fi
+done
+
 docker build --tag learning_machines .
 docker run -it --rm \
     --name robobo-deploy \
     --network host \
+    "${docker_ros_env[@]}" \
     -v "$(pwd)":/workspace \
     --env-file .env \
     --entrypoint bash \
