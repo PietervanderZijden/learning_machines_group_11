@@ -35,6 +35,19 @@ CALIBRATION_PHASES = ("open_space", "wall_40cm", "wall_25cm", "wall_15cm", "near
 WHEEL_CONFIRMATION = "WHEELS RAISED"
 
 
+def initialize_camera_down(robot: Any, target: int, speed: int = 10) -> dict[str, int]:
+    """Move the phone to the ground-facing pose before collecting test data."""
+    target = int(np.clip(target, 26, 109))
+    before = int(robot.read_phone_tilt())
+    robot.set_phone_tilt_blocking(target, int(np.clip(speed, 1, 100)))
+    time.sleep(0.2)
+    return {
+        "requested": target,
+        "before": before,
+        "after": int(robot.read_phone_tilt()),
+    }
+
+
 def summarize_ir(samples: np.ndarray) -> dict[str, dict[str, float]]:
     values = np.asarray(samples, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] != 8:
@@ -427,6 +440,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         camera_message = ros_result.pop("camera_message", None)
         report["ros"] = ros_result
+        report["camera_initialization"] = initialize_camera_down(
+            robot, args.tilt_position
+        )
 
         if args.skip_ir:
             report["ir"] = {
@@ -455,11 +471,9 @@ def main(argv: list[str] | None = None) -> int:
         if camera_message is not None:
             import cv2
 
-            encoded = np.frombuffer(camera_message.data, dtype=np.uint8)
-            image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+            image = robot.read_image_front()
             if image is None:
-                raise RuntimeError("Camera topic arrived but JPEG decoding failed")
-            image = cv2.flip(image, 1)
+                raise RuntimeError("Camera topic arrived but a fresh frame was unavailable")
             image_path = output_dir / "camera.jpg"
             cv2.imwrite(str(image_path), image)
             report["camera"] = {
@@ -470,14 +484,7 @@ def main(argv: list[str] | None = None) -> int:
             }
 
         if args.test_tilt:
-            target = int(np.clip(args.tilt_position, 26, 109))
-            before = int(robot.read_phone_tilt())
-            robot.set_phone_tilt_blocking(target, 10)
-            report["tilt_test"] = {
-                "requested": target,
-                "before": before,
-                "after": int(robot.read_phone_tilt()),
-            }
+            report["tilt_test"] = report["camera_initialization"]
 
         if args.calibrate_ir:
             report["calibration"] = _write_calibration(

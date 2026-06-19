@@ -391,9 +391,17 @@ class RoboboCompactEnv(gym.Env):
 
         actual = self._wait_for_tilt_script_ready(self.config.phone_tilt_timeout)
         try:
+            if not self._is_simulation and hasattr(
+                self.rob, "set_phone_tilt_blocking"
+            ):
+                self.rob.set_phone_tilt_blocking(
+                    self.config.phone_tilt,
+                    self.config.phone_tilt_speed,
+                )
+                self._settle(self.config.reset_settle_time)
+                return
             self.rob.set_phone_tilt(
-                self.config.phone_tilt,
-                self.config.phone_tilt_speed,
+                self.config.phone_tilt, self.config.phone_tilt_speed
             )
         except Exception as exc:
             raise RuntimeError("failed to command the Robobo phone tilt") from exc

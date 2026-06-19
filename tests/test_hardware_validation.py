@@ -3,6 +3,7 @@ import numpy as np
 from learning_machines.calibrate_ir import robust_profile
 from validate_hardware import (
     calibration_quality,
+    initialize_camera_down,
     run_wheel_test,
     summarize_ir,
 )
@@ -58,3 +59,24 @@ def test_wheel_test_is_bounded_and_stops_between_commands():
         if command[:2] != (0, 0):
             assert robot.commands[index - 1] == (0, 0, 200)
             assert robot.commands[index + 1] == (0, 0, 200)
+
+
+def test_camera_is_moved_down_with_blocking_hardware_api(monkeypatch):
+    class TiltRobot:
+        def __init__(self):
+            self.tilt = 50
+            self.commands = []
+
+        def read_phone_tilt(self):
+            return self.tilt
+
+        def set_phone_tilt_blocking(self, target, speed):
+            self.commands.append((target, speed))
+            self.tilt = target
+
+    monkeypatch.setattr("validate_hardware.time.sleep", lambda _: None)
+    robot = TiltRobot()
+    result = initialize_camera_down(robot, target=100)
+
+    assert robot.commands == [(100, 10)]
+    assert result == {"requested": 100, "before": 50, "after": 100}
