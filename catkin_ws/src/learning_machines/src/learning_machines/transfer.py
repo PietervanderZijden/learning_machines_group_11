@@ -278,13 +278,12 @@ class CheckpointManifest:
     def validate(
         self,
         algorithm: str,
-        calibration_profile: str,
+        calibration_profile: str | None,
         image_size: int,
         phone_tilt: int = 100,
     ) -> None:
         expected = {
             "algorithm": algorithm,
-            "calibration_profile": calibration_profile,
             "image_size": image_size,
             "phone_tilt": phone_tilt,
             "control_interval_seconds": CONTROL_INTERVAL_SECONDS,
@@ -292,6 +291,8 @@ class CheckpointManifest:
             "reward_contract": REWARD_CONTRACT_VERSION,
             "smoothing": asdict(SmoothingConfig()),
         }
+        if calibration_profile is not None:
+            expected["calibration_profile"] = calibration_profile
         actual = asdict(self)
         mismatches = [f"{key}: expected {value!r}, got {actual[key]!r}"
                       for key, value in expected.items() if actual[key] != value]

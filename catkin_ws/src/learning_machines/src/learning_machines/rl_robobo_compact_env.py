@@ -324,7 +324,14 @@ class RoboboCompactEnv(gym.Env):
 
     def _read_phone_tilt(self) -> int | None:
         try:
-            return int(self.rob.read_phone_tilt())
+            value = int(self.rob.read_phone_tilt())
+            # Some Robobo hardware installations actuate tilt correctly but
+            # never publish /robot/tilt, leaving the subscriber's startup
+            # value at zero. Treat impossible hardware values as unavailable;
+            # simulation retains strict feedback checking.
+            if not self._is_simulation and not 26 <= value <= 109:
+                return None
+            return value
         except Exception:
             return None
 

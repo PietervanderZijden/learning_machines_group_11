@@ -146,10 +146,14 @@ def _write_calibration(
         values = collect_phase(robot, phase, duration, hz)
         samples[phase] = values
         for sample_index, value in enumerate(values):
-            rows.append(
-                {"phase": phase, "sample": sample_index}
-                | {label: float(value[i]) for i, label in enumerate(IR_LABELS)}
+            row = {"phase": phase, "sample": sample_index}
+            row.update(
+                {
+                    label: float(value[i])
+                    for i, label in enumerate(IR_LABELS)
+                }
             )
+            rows.append(row)
 
     profile_path = output_dir / "hardware.json"
     csv_path = output_dir / "ir_calibration_samples.csv"
@@ -221,7 +225,8 @@ def _topic_endpoint_diagnostics(topic: str) -> dict[str, Any]:
         master = xmlrpc.client.ServerProxy(master_uri)
         code, message, state = master.getSystemState(caller)
         if code != 1:
-            return report | {"master_error": message}
+            report["master_error"] = message
+            return report
         published_topics, _subscribed_topics, _services = state
         code, message, topic_types = master.getPublishedTopics(caller, "")
         if code == 1:

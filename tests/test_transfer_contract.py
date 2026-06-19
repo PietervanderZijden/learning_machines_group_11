@@ -173,6 +173,9 @@ def test_manifest_rejects_incompatible_checkpoint(tmp_path):
     manifest.save(path)
     loaded = CheckpointManifest.load(path)
     loaded.validate("sac", "hardware", 64)
+    # Runtime hardware calibration may differ from the calibration used to
+    # train the checkpoint. All other deployment contracts remain strict.
+    loaded.validate("sac", None, 64)
     try:
         loaded.validate("dreamerv3", "hardware", 64)
     except ValueError as exc:
@@ -273,6 +276,42 @@ def test_reset_points_camera_down_before_first_observation():
     _, info = env.reset()
     assert rob.tilt == 105
     assert info["phone_tilt"] == 105
+
+
+def test_invalid_hardware_tilt_feedback_is_treated_as_unavailable():
+    class StaleTiltRobobo(_FakeRobobo):
+        def set_phone_tilt(self, tilt, speed):
+            self.commanded_tilt = tilt
+
+        def read_phone_tilt(self):
+            return 0
+
+    rob = StaleTiltRobobo()
+    env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
+        phone_tilt=100,
+        reset_settle_time=0.0,
+        randomize_food_positions=False,
+    ))
+    _, info = env.reset()
+    assert rob.commanded_tilt == 100
+    assert info["phone_tilt"] is None
+
+
+def test_hardware_wheel_speed_cap_is_applied_by_environment():
+    rob = _FakeRobobo()
+    env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
+        max_wheel_speed=70,
+        action_smoothing=False,
+        detect_blob_from_camera=False,
+        randomize_food_positions=False,
+        reset_settle_time=0.0,
+    ))
+    env.reset()
+    env.step(np.ones(2, dtype=np.float32))
+    env.step(np.ones(2, dtype=np.float32))
+    left, right, duration = rob.commands[-1]
+    assert left == right == 70
+    assert duration == 0.4
 
 
 def test_zero_reset_settle_does_not_advance_simulation():

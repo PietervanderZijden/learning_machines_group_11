@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import queue
 import sys
@@ -12,6 +13,22 @@ from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
+
+
+RAISED_WHEEL_CONFIRMATION = "WHEELS RAISED"
+MAX_DEPLOY_WHEEL_SPEED = 70
+
+
+def install_numpy_checkpoint_compat() -> None:
+    """Allow NumPy 2.x checkpoints to load under ROS's NumPy 1.x runtime."""
+    aliases = {
+        "numpy._core": "numpy.core",
+        "numpy._core.multiarray": "numpy.core.multiarray",
+        "numpy._core._multiarray_umath": "numpy.core._multiarray_umath",
+        "numpy._core.numeric": "numpy.core.numeric",
+    }
+    for saved_name, runtime_name in aliases.items():
+        sys.modules.setdefault(saved_name, importlib.import_module(runtime_name))
 
 
 class OperatorControls:
@@ -85,6 +102,7 @@ class DreamerV3Policy(Policy):
     def __init__(self, checkpoint: str):
         import torch
         from learning_machines.dreamerv3 import DreamerV3
+        install_numpy_checkpoint_compat()
         saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
         self.agent = DreamerV3(saved["cfg"], device="auto")
         self.agent.load(checkpoint)
@@ -108,6 +126,7 @@ class DreamerV3Policy(Policy):
 class DreamerV4Policy(Policy):
     def __init__(self, checkpoint: str, device):
         from learning_machines.dreamerv4.dreamerv4_image import ImageDreamerV4Agent
+        install_numpy_checkpoint_compat()
         self.agent = ImageDreamerV4Agent.load(checkpoint, device)
         self.device = device
 
@@ -141,8 +160,45 @@ def main():
     parser.add_argument("--phone-tilt", type=int, default=100)
     parser.add_argument("--max-seconds", type=float, default=60.0)
     parser.add_argument("--stale-timeout", type=float, default=1.0)
+    parser.add_argument(
+        "--max-wheel-speed",
+        type=int,
+        default=MAX_DEPLOY_WHEEL_SPEED,
+        help="Absolute motor speed cap; hardware deployment is capped at 70.",
+    )
+    parser.add_argument(
+        "--raised-wheel-test",
+        action="store_true",
+        help="Guarded policy rollout with every wheel physically clear.",
+    )
+    parser.add_argument(
+        "--wheel-confirmation",
+        help=f"Must equal {RAISED_WHEEL_CONFIRMATION!r}; interactive entry is safer.",
+    )
     parser.add_argument("--log-dir", default="hardware_logs")
     args = parser.parse_args()
+    if not 1 <= args.max_wheel_speed <= MAX_DEPLOY_WHEEL_SPEED:
+        parser.error(
+            f"--max-wheel-speed must be between 1 and {MAX_DEPLOY_WHEEL_SPEED}"
+        )
+    if args.max_seconds <= 0:
+        parser.error("--max-seconds must be positive")
+    if args.stale_timeout <= 0:
+        parser.error("--stale-timeout must be positive")
+    run_seconds = min(args.max_seconds, 10.0) if args.raised_wheel_test else args.max_seconds
+    if args.raised_wheel_test:
+        confirmation = args.wheel_confirmation
+        if confirmation is None:
+            confirmation = input(
+                f"Raise the robot so every wheel is clear. "
+                f"Type {RAISED_WHEEL_CONFIRMATION}: "
+            )
+        if confirmation != RAISED_WHEEL_CONFIRMATION:
+            raise RuntimeError("raised-wheel policy confirmation was not accepted")
+        print(
+            f"Raised-wheel policy test enabled; duration capped at "
+            f"{run_seconds:.1f}s."
+        )
 
     root = Path(__file__).resolve().parent
     sys.path.insert(0, str(root / "catkin_ws/src/learning_machines/src"))
@@ -165,9 +221,14 @@ def main():
     manifest = CheckpointManifest.load(manifest_path)
     manifest.validate(
         args.algorithm,
-        calibration.name,
+        None,
         args.image_size,
         args.phone_tilt,
+    )
+    print(
+        f"Checkpoint training calibration={manifest.calibration_profile!r}; "
+        f"runtime hardware calibration={calibration.name!r} "
+        f"from {args.calibration}"
     )
     if (
         args.algorithm == "sac"
@@ -193,7 +254,8 @@ def main():
         image_obs_size=(args.image_size, args.image_size),
         phone_tilt=args.phone_tilt,
         calibration_profile=calibration,
-        max_episode_seconds=args.max_seconds,
+        max_episode_seconds=run_seconds,
+        max_wheel_speed=args.max_wheel_speed,
         randomize_food_positions=False,
     ))
     controls = OperatorControls()
@@ -216,6 +278,7 @@ def main():
     inference_latencies = []
     overruns = []
     safety_events = []
+    collisions = []
     food_events = []
     watchdog_failure = None
     food_count = 0
@@ -228,7 +291,7 @@ def main():
         images.append(obs["image"].copy())
         started = time.monotonic()
         with step_log_path.open("w") as step_log:
-            while time.monotonic() - started < args.max_seconds:
+            while time.monotonic() - started < run_seconds:
                 if rospy.is_shutdown():
                     watchdog_failure = "lost_ros_communication"
                     break
@@ -273,6 +336,7 @@ def main():
                 inference_latencies.append(inference_latency)
                 overruns.append(overrun)
                 safety_events.append(info.get("safety_override"))
+                collisions.append(bool(info["collision"]))
                 food_events.append(annotated_food)
                 observations.append(np.concatenate([next_obs["blob"], next_obs["ir"]]).astype(np.float32))
                 raw_irs.append(np.asarray(info["raw_ir"], dtype=np.float32))
@@ -312,10 +376,58 @@ def main():
             inference_latencies=np.asarray(inference_latencies, dtype=np.float32),
             timing_overruns=np.asarray(overruns, dtype=np.float32),
             safety_events=np.asarray(safety_events, dtype="U32"),
+            collisions=np.asarray(collisions, dtype=bool),
             food_events=np.asarray(food_events, dtype=np.int16),
             manifest=json.dumps(asdict(manifest)),
+            runtime_calibration=args.calibration,
+            max_wheel_speed=args.max_wheel_speed,
+            raised_wheel_test=args.raised_wheel_test,
             watchdog_failure=watchdog_failure or "",
         )
+
+    requested_array = np.asarray(requested_actions, dtype=np.float32)
+    executed_array = np.asarray(executed_actions, dtype=np.float32)
+    latency_array = np.asarray(inference_latencies, dtype=np.float32)
+    overrun_array = np.asarray(overruns, dtype=np.float32)
+    safety_counts = {
+        str(event): safety_events.count(event)
+        for event in sorted({event for event in safety_events if event})
+    }
+    summary = {
+        "algorithm": args.algorithm,
+        "checkpoint": args.checkpoint,
+        "training_calibration": manifest.calibration_profile,
+        "runtime_calibration": args.calibration,
+        "raised_wheel_test": args.raised_wheel_test,
+        "max_wheel_speed": args.max_wheel_speed,
+        "steps": len(rewards),
+        "elapsed_seconds": float(len(rewards) * CONTROL_INTERVAL_SECONDS),
+        "watchdog_failure": watchdog_failure or "",
+        "collisions": int(np.sum(collisions)),
+        "safety_events": safety_counts,
+        "max_abs_requested_action": (
+            float(np.max(np.abs(requested_array)))
+            if requested_array.size else 0.0
+        ),
+        "max_abs_executed_action": (
+            float(np.max(np.abs(executed_array)))
+            if executed_array.size else 0.0
+        ),
+        "mean_inference_latency": (
+            float(np.mean(latency_array)) if latency_array.size else 0.0
+        ),
+        "p95_inference_latency": (
+            float(np.quantile(latency_array, 0.95))
+            if latency_array.size else 0.0
+        ),
+        "max_timing_overrun": (
+            float(np.max(overrun_array)) if overrun_array.size else 0.0
+        ),
+    }
+    summary_path = log_dir / f"{episode_id}_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary, indent=2))
+    print(f"Saved deployment summary to {summary_path}")
 
     if watchdog_failure:
         raise RuntimeError(f"watchdog stopped deployment: {watchdog_failure}")
