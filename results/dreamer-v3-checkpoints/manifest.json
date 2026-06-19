@@ -1,0 +1,28 @@
+{
+  "algorithm": "dreamerv3",
+  "algorithm_config": {
+    "action_dim": 2,
+    "actor_lr": 4e-05,
+    "gamma": 0.997,
+    "imagination_horizon": 15,
+    "ir_dim": 8,
+    "multimodal": true,
+    "observation_dim": 12,
+    "optimizer": "laprop",
+    "sequence_length": 50,
+    "stochastic_bins": 32,
+    "stochastic_classes": 32,
+    "world_lr": 4e-05
+  },
+  "calibration_profile": "simulation",
+  "control_interval_seconds": 0.4,
+  "image_size": 64,
+  "observation_contract": "robobo-obs-v2",
+  "phone_tilt": 100,
+  "reward_contract": "robobo-reward-v4",
+  "smoothing": {
+    "max_delta": 0.5,
+    "previous_weight": 0.65,
+    "requested_weight": 0.35
+  }
+}

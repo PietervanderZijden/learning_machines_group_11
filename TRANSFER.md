@@ -130,6 +130,29 @@ to W&B with `--wandb-project`.
 
 ## Hardware deployment
 
+For a fresh deployment machine, clone this repository and transfer the model
+checkpoint separately to:
+
+```text
+results/dreamer-v3-checkpoints/dreamerv3_best.pt
+```
+
+The small checkpoint manifest is tracked in the same directory. Configure the
+machine-specific ROS environment without committing credentials:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`, or export `ROS_MASTER_URI` and `ROS_IP` in the shell. Build and
+verify the container before connecting the robot:
+
+```bash
+docker build --tag learning_machines .
+docker run --rm --entrypoint python3 learning_machines \
+  -c 'import torch; print(torch.__version__)'
+```
+
 Before deploying a policy, run the read-only hardware diagnostics:
 
 ```bash
@@ -181,6 +204,36 @@ deliberately rejected for calibration and all non-raised-wheel operation.
   sac \
   sac_models/sac_latest.zip \
   config/calibration/hardware.json
+```
+
+Checkpoint manifests retain the calibration profile used during training
+(normally `simulation`). Hardware deployment separately loads the measured
+runtime profile from `config/calibration/hardware.json`; all observation,
+reward, timing, image-size, tilt, and smoothing contracts remain strict.
+Wheel commands are capped at 70 by default and cannot be configured above 70.
+
+Before placing the robot on the floor, run the policy with every wheel raised:
+
+```bash
+./run_hardware_deploy.sh \
+  dreamerv3 \
+  results/dreamer-v3-checkpoints/dreamerv3_best.pt \
+  config/calibration/hardware.json \
+  --raised-wheel-test \
+  --max-seconds 10 \
+  --max-wheel-speed 70
+```
+
+Type `WHEELS RAISED` when prompted. Then perform a short empty-arena run with
+an operator ready to enter `e` and press Enter:
+
+```bash
+./run_hardware_deploy.sh \
+  dreamerv3 \
+  results/dreamer-v3-checkpoints/dreamerv3_best.pt \
+  config/calibration/hardware.json \
+  --max-seconds 10 \
+  --max-wheel-speed 70
 ```
 
 During rollout, enter `f` to annotate a food event and `e` or `q` for emergency

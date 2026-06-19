@@ -24,7 +24,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # stack explicitly for physical deployment.
 COPY ./requirements-hardware.txt /requirements-hardware.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r /requirements-hardware.txt \
+    python3 -m pip install --upgrade "pip==24.3.1" \
+    && python3 -m pip install \
+        --index-url https://download.pytorch.org/whl/cpu \
+        "torch==2.4.1" \
+    && python3 -m pip install -r /requirements-hardware.txt \
     && rm /requirements-hardware.txt
 
 # This cd's into a new `catkin_ws` directory anyone starting the shell will end up in.
