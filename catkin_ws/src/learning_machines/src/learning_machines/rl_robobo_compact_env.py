@@ -391,13 +391,31 @@ class RoboboCompactEnv(gym.Env):
 
         actual = self._wait_for_tilt_script_ready(self.config.phone_tilt_timeout)
         try:
-            if not self._is_simulation and hasattr(
-                self.rob, "set_phone_tilt_blocking"
-            ):
-                self.rob.set_phone_tilt_blocking(
+            if not self._is_simulation:
+                blockid = self.rob.set_phone_tilt(
                     self.config.phone_tilt,
                     self.config.phone_tilt_speed,
                 )
+                try:
+                    if actual is not None:
+                        deadline = time.monotonic() + self.config.phone_tilt_timeout
+                        while time.monotonic() < deadline:
+                            actual = self._read_phone_tilt()
+                            if (
+                                actual is not None
+                                and abs(actual - self.config.phone_tilt)
+                                <= self.config.phone_tilt_tolerance
+                            ):
+                                break
+                            self.rob.sleep(0.1)
+                        else:
+                            raise RuntimeError(
+                                "phone tilt did not reach ground-facing target "
+                                f"{self.config.phone_tilt}; actual={actual}"
+                            )
+                finally:
+                    if hasattr(self.rob, "_used_pids"):
+                        self.rob._used_pids.discard(blockid)
                 self._settle(self.config.reset_settle_time)
                 return
             self.rob.set_phone_tilt(

@@ -61,18 +61,20 @@ def test_wheel_test_is_bounded_and_stops_between_commands():
             assert robot.commands[index + 1] == (0, 0, 200)
 
 
-def test_camera_is_moved_down_with_blocking_hardware_api(monkeypatch):
+def test_camera_is_moved_down_without_blocking_on_unlock(monkeypatch):
     class TiltRobot:
         def __init__(self):
             self.tilt = 50
             self.commands = []
+            self._used_pids = {7}
 
         def read_phone_tilt(self):
             return self.tilt
 
-        def set_phone_tilt_blocking(self, target, speed):
+        def set_phone_tilt(self, target, speed):
             self.commands.append((target, speed))
             self.tilt = target
+            return 7
 
     monkeypatch.setattr("validate_hardware.time.sleep", lambda _: None)
     robot = TiltRobot()
@@ -80,3 +82,4 @@ def test_camera_is_moved_down_with_blocking_hardware_api(monkeypatch):
 
     assert robot.commands == [(100, 10)]
     assert result == {"requested": 100, "before": 50, "after": 100}
+    assert not robot._used_pids

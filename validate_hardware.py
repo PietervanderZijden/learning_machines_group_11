@@ -35,16 +35,41 @@ CALIBRATION_PHASES = ("open_space", "wall_40cm", "wall_25cm", "wall_15cm", "near
 WHEEL_CONFIRMATION = "WHEELS RAISED"
 
 
-def initialize_camera_down(robot: Any, target: int, speed: int = 10) -> dict[str, int]:
-    """Move the phone to the ground-facing pose before collecting test data."""
+def initialize_camera_down(
+    robot: Any,
+    target: int,
+    speed: int = 10,
+    timeout: float = 6.0,
+) -> dict[str, int]:
+    """Move the phone down without waiting indefinitely for an unlock callback."""
     target = int(np.clip(target, 26, 109))
     before = int(robot.read_phone_tilt())
-    robot.set_phone_tilt_blocking(target, int(np.clip(speed, 1, 100)))
-    time.sleep(0.2)
+    blockid = robot.set_phone_tilt(target, int(np.clip(speed, 1, 100)))
+    try:
+        deadline = time.monotonic() + max(0.1, timeout)
+        after = before
+        if 26 <= before <= 109:
+            while time.monotonic() < deadline:
+                after = int(robot.read_phone_tilt())
+                if 26 <= after <= 109 and abs(after - target) <= 5:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(
+                    f"phone tilt did not reach ground-facing target {target}; actual={after}"
+                )
+        else:
+            # Hardware feedback can remain at its startup value when the phone was
+            # already at the requested pose. Allow bounded time for the command.
+            time.sleep(min(1.5, timeout))
+            after = int(robot.read_phone_tilt())
+    finally:
+        if hasattr(robot, "_used_pids"):
+            robot._used_pids.discard(blockid)
     return {
         "requested": target,
         "before": before,
-        "after": int(robot.read_phone_tilt()),
+        "after": after,
     }
 
 

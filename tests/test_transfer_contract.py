@@ -278,17 +278,19 @@ def test_reset_points_camera_down_before_first_observation():
     assert info["phone_tilt"] == 105
 
 
-def test_hardware_reset_uses_blocking_camera_tilt_api():
-    class BlockingTiltRobobo(_FakeRobobo):
+def test_hardware_reset_uses_bounded_async_camera_tilt_api():
+    class AsyncTiltRobobo(_FakeRobobo):
         def __init__(self):
             super().__init__()
-            self.blocking_tilts = []
+            self.async_tilts = []
 
-        def set_phone_tilt_blocking(self, tilt, speed):
-            self.blocking_tilts.append((tilt, speed))
+        def set_phone_tilt(self, tilt, speed):
+            self.async_tilts.append((tilt, speed))
             self.tilt = tilt
+            self._used_pids.add(9)
+            return 9
 
-    rob = BlockingTiltRobobo()
+    rob = AsyncTiltRobobo()
     env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
         phone_tilt=100,
         phone_tilt_speed=10,
@@ -297,7 +299,8 @@ def test_hardware_reset_uses_blocking_camera_tilt_api():
     ))
     env.reset()
 
-    assert rob.blocking_tilts == [(100, 10)]
+    assert rob.async_tilts == [(100, 10)]
+    assert not rob._used_pids
 
 
 def test_invalid_hardware_tilt_feedback_is_treated_as_unavailable():
