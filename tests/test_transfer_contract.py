@@ -420,32 +420,6 @@ def test_hardware_uses_main_branch_blocking_move_api():
     assert rob.commands == [(0, 0, 0.4)]
 
 
-def test_hardware_continuous_mode_avoids_blocking_unlock_callback():
-    class ContinuousHardware(_FakeRobobo):
-        def __init__(self):
-            super().__init__()
-            self.blocking_commands = []
-
-        def move_blocking(self, left, right, millis):
-            self.blocking_commands.append((left, right, millis))
-
-    rob = ContinuousHardware()
-    env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
-        max_wheel_speed=20,
-        action_smoothing=False,
-        hardware_blocking_commands=False,
-        detect_blob_from_camera=False,
-        randomize_food_positions=False,
-        reset_settle_time=0.0,
-    ))
-    env.reset()
-    env.step(np.ones(2, dtype=np.float32))
-    env.step(np.ones(2, dtype=np.float32))
-
-    assert rob.blocking_commands == []
-    assert rob.commands[-2:] == [(10, 10, 0.4), (20, 20, 0.4)]
-
-
 def test_zero_reset_settle_does_not_advance_simulation():
     class SimRob(_FakeRobobo):
         def __init__(self):

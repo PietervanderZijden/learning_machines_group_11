@@ -204,14 +204,6 @@ def main(rob=None, argv=None):
         help="Absolute motor speed cap; hardware deployment is capped at 70.",
     )
     parser.add_argument(
-        "--continuous-wheel-commands",
-        action="store_true",
-        help=(
-            "Use asynchronous hardware.py wheel commands and avoid waiting "
-            "for /robot/unlock/move; the 400 ms policy interval is retained."
-        ),
-    )
-    parser.add_argument(
         "--raised-wheel-test",
         action="store_true",
         help="Guarded policy rollout with every wheel physically clear.",
@@ -323,7 +315,6 @@ def main(rob=None, argv=None):
         calibration_profile=calibration,
         max_episode_seconds=run_seconds,
         max_wheel_speed=args.max_wheel_speed,
-        hardware_blocking_commands=not args.continuous_wheel_commands,
         randomize_food_positions=False,
     ))
     controls = OperatorControls()
@@ -471,7 +462,6 @@ def main(rob=None, argv=None):
             runtime_calibration=args.calibration,
             max_wheel_speed=args.max_wheel_speed,
             raised_wheel_test=args.raised_wheel_test,
-            continuous_wheel_commands=args.continuous_wheel_commands,
             watchdog_failure=watchdog_failure or "",
         )
 
@@ -493,7 +483,6 @@ def main(rob=None, argv=None):
         "runtime_calibration": args.calibration,
         "raised_wheel_test": args.raised_wheel_test,
         "max_wheel_speed": args.max_wheel_speed,
-        "continuous_wheel_commands": args.continuous_wheel_commands,
         "steps": len(rewards),
         "elapsed_seconds": float(len(rewards) * CONTROL_INTERVAL_SECONDS),
         "watchdog_failure": watchdog_failure or "",
