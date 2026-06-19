@@ -75,8 +75,28 @@ class Policy:
 
 class SACPolicy(Policy):
     def __init__(self, checkpoint: str):
+        from gymnasium import spaces
         from stable_baselines3 import SAC
-        self.model = SAC.load(checkpoint)
+        install_numpy_checkpoint_compat()
+        observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32
+        )
+        action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(2,), dtype=np.float32
+        )
+        self.model = SAC.load(
+            checkpoint,
+            custom_objects={
+                "observation_space": observation_space,
+                "action_space": action_space,
+                "_last_obs": None,
+                "_last_original_obs": None,
+                "_last_episode_starts": None,
+                "ep_info_buffer": None,
+                "ep_success_buffer": None,
+                "lr_schedule": lambda _progress: 0.0,
+            },
+        )
         self.previous_executed = np.zeros(2, dtype=np.float32)
         self.observation_dim = int(self.model.observation_space.shape[0])
         if self.observation_dim not in (12, 14):

@@ -7,10 +7,38 @@ import csv
 import json
 import math
 import os
+import shlex
 import sys
 from pathlib import Path
 
 import numpy as np
+
+
+def _load_repository_env(path: Path) -> list[str]:
+    """Load simple .env values without overriding the caller's environment."""
+    loaded = []
+    if not path.exists():
+        return loaded
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        name, raw_value = line.split("=", 1)
+        name = name.strip()
+        if not name or name in os.environ:
+            continue
+        try:
+            values = shlex.split(raw_value, comments=True, posix=True)
+        except ValueError as exc:
+            raise ValueError(f"invalid .env value for {name}") from exc
+        value = values[0] if values else ""
+        os.environ[name] = value
+        loaded.append(name)
+    return loaded
 
 
 def _dreamerv3_prior_prediction(policy, executed_action: np.ndarray) -> dict:
@@ -200,6 +228,7 @@ def main():
         parser.error("--max-diagnostic-images cannot be negative")
 
     root = Path(__file__).resolve().parent
+    loaded_env = _load_repository_env(root / ".env")
     sys.path.insert(0, str(root / "catkin_ws/src/learning_machines/src"))
     sys.path.insert(0, str(root / "catkin_ws/src/robobo_interface/src"))
     os.environ["COPPELIA_SIM_PORT"] = str(args.port)
@@ -265,11 +294,29 @@ def main():
     wandb_run = None
     if args.wandb_project:
         import wandb
-        wandb_run = wandb.init(
-            project=args.wandb_project,
-            name=f"eval-{args.algorithm}-{args.domain}",
-            config=vars(args),
-        )
+        api_key = os.environ.get("WANDB_API_KEY")
+        if not api_key:
+            parser.error(
+                "W&B logging requires WANDB_API_KEY in the shell or repository .env"
+            )
+        try:
+            wandb.login(key=api_key, verify=True)
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                entity=os.environ.get("WANDB_ENTITY"),
+                name=f"eval-{args.algorithm}-{args.domain}",
+                config={
+                    **vars(args),
+                    "env_values_loaded": [
+                        name for name in loaded_env if name != "WANDB_API_KEY"
+                    ],
+                },
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "W&B authentication failed. Verify WANDB_API_KEY and, if the "
+                "project belongs to a team, set WANDB_ENTITY to that team name."
+            ) from exc
         wandb.define_metric("evaluation/transition")
         wandb.define_metric("diagnostics/*", step_metric="evaluation/transition")
         wandb.define_metric("evaluation/episode")
