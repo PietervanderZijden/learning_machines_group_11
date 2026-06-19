@@ -1,4 +1,4 @@
-from deploy_hardware import sensor_acquisition_seconds
+from deploy_hardware import exception_summary, sensor_acquisition_seconds
 
 
 def test_sensor_watchdog_excludes_blocking_wheel_duration():
@@ -17,3 +17,10 @@ def test_sensor_watchdog_uses_safe_fallback_for_invalid_timing():
     assert sensor_acquisition_seconds(
         {"observation": float("nan")}, fallback=1.2
     ) == 1.2
+
+
+def test_exception_summary_preserves_message_on_one_line():
+    error = RuntimeError("service failed\nconnection reset")
+    assert exception_summary(error) == (
+        "RuntimeError: service failed connection reset"
+    )

@@ -29,6 +29,14 @@ def sensor_acquisition_seconds(step_timing: dict, fallback: float) -> float:
     return value if np.isfinite(value) and value >= 0.0 else float(fallback)
 
 
+def exception_summary(exc: Exception) -> str:
+    message = " ".join(str(exc).split())
+    return (
+        f"{type(exc).__name__}: {message}"
+        if message else type(exc).__name__
+    )
+
+
 def install_numpy_checkpoint_compat() -> None:
     """Allow NumPy 2.x checkpoints to load under ROS's NumPy 1.x runtime."""
     aliases = {
@@ -378,7 +386,9 @@ def main(rob=None, argv=None):
                 try:
                     requested = np.asarray(policy.act(obs), dtype=np.float32)
                 except Exception as exc:
-                    watchdog_failure = f"inference_failure:{type(exc).__name__}"
+                    watchdog_failure = (
+                        f"inference_failure:{exception_summary(exc)}"
+                    )
                     break
                 inference_latency = time.perf_counter() - inference_start
                 if not np.isfinite(requested).all():
@@ -388,7 +398,9 @@ def main(rob=None, argv=None):
                 try:
                     next_obs, reward, terminated, truncated, info = env.step(requested)
                 except Exception as exc:
-                    watchdog_failure = f"sensor_or_command_failure:{type(exc).__name__}"
+                    watchdog_failure = (
+                        f"sensor_or_command_failure:{exception_summary(exc)}"
+                    )
                     break
                 cycle_duration = time.monotonic() - cycle_start
                 overrun = max(0.0, cycle_duration - CONTROL_INTERVAL_SECONDS)
