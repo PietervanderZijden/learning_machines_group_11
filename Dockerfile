@@ -19,6 +19,14 @@ COPY ./requirements.txt /requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r /requirements.txt && rm /requirements.txt
 
+# ROS Noetic uses Python 3.8, while the host training environment uses a newer
+# Python and ROCm PyTorch. Install a CPU-only, Python-3.8-compatible inference
+# stack explicitly for physical deployment.
+COPY ./requirements-hardware.txt /requirements-hardware.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r /requirements-hardware.txt \
+    && rm /requirements-hardware.txt
+
 # This cd's into a new `catkin_ws` directory anyone starting the shell will end up in.
 WORKDIR /root/catkin_ws
 
