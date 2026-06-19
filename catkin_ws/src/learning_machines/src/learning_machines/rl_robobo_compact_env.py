@@ -208,8 +208,18 @@ class RoboboCompactEnv(gym.Env):
 
         try:
             wheel_start = time.perf_counter()
-            self.rob.set_wheel_speeds(left_speed, right_speed, duration_s=duration_s)
-            explicit_step_seconds = duration_s
+            if not self._is_simulation and hasattr(self.rob, "move_blocking"):
+                self.rob.move_blocking(
+                    int(np.clip(round(left_speed), -100, 100)),
+                    int(np.clip(round(right_speed), -100, 100)),
+                    int(round(duration_s * 1000.0)),
+                )
+                explicit_step_seconds = 0.0
+            else:
+                self.rob.set_wheel_speeds(
+                    left_speed, right_speed, duration_s=duration_s
+                )
+                explicit_step_seconds = duration_s
             if self._is_simulation:
                 explicit_step_seconds = max(
                     0.0, duration_s - self._observation_sim_seconds

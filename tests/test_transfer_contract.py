@@ -314,6 +314,31 @@ def test_hardware_wheel_speed_cap_is_applied_by_environment():
     assert duration == 0.4
 
 
+def test_hardware_uses_main_branch_blocking_move_api():
+    class BlockingHardware(_FakeRobobo):
+        def __init__(self):
+            super().__init__()
+            self.blocking_commands = []
+
+        def move_blocking(self, left, right, millis):
+            self.blocking_commands.append((left, right, millis))
+
+    rob = BlockingHardware()
+    env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
+        max_wheel_speed=70,
+        action_smoothing=False,
+        detect_blob_from_camera=False,
+        randomize_food_positions=False,
+        reset_settle_time=0.0,
+    ))
+    env.reset()
+    env.step(np.ones(2, dtype=np.float32))
+    env.step(np.ones(2, dtype=np.float32))
+
+    assert rob.blocking_commands == [(35, 35, 400), (70, 70, 400)]
+    assert rob.commands == [(0, 0, 0.4)]
+
+
 def test_zero_reset_settle_does_not_advance_simulation():
     class SimRob(_FakeRobobo):
         def __init__(self):

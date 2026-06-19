@@ -150,7 +150,7 @@ def stop_robot(rob) -> None:
             pass
 
 
-def main():
+def main(rob=None, argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--algorithm", required=True, choices=["sac", "dreamerv3", "dreamerv4"])
     parser.add_argument("--checkpoint", required=True)
@@ -176,7 +176,7 @@ def main():
         help=f"Must equal {RAISED_WHEEL_CONFIRMATION!r}; interactive entry is safer.",
     )
     parser.add_argument("--log-dir", default="hardware_logs")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not 1 <= args.max_wheel_speed <= MAX_DEPLOY_WHEEL_SPEED:
         parser.error(
             f"--max-wheel-speed must be between 1 and {MAX_DEPLOY_WHEEL_SPEED}"
@@ -206,7 +206,6 @@ def main():
 
     import rospy
     import torch
-    from robobo_interface import HardwareRobobo
     from learning_machines.rl_robobo_compact_env import RoboboCompactEnv, RoboboCompactEnvConfig
     from learning_machines.transfer import (
         CONTROL_INTERVAL_SECONDS,
@@ -248,7 +247,9 @@ def main():
     else:
         policy = DreamerV4Policy(args.checkpoint, device)
 
-    rob = HardwareRobobo(camera=True)
+    if rob is None:
+        from robobo_interface import HardwareRobobo
+        rob = HardwareRobobo(camera=True)
     env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
         return_image=True,
         image_obs_size=(args.image_size, args.image_size),
@@ -285,7 +286,13 @@ def main():
     policy.reset()
 
     try:
+        print(
+            "Initializing phone tilt, camera, and sensors. "
+            "Policy controls become active after this completes.",
+            flush=True,
+        )
         obs, info = env.reset()
+        print("Hardware initialization complete; starting policy rollout.", flush=True)
         observations.append(np.concatenate([obs["blob"], obs["ir"]]).astype(np.float32))
         raw_irs.append(np.asarray(info["raw_ir"], dtype=np.float32))
         images.append(obs["image"].copy())

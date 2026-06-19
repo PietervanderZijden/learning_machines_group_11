@@ -37,19 +37,11 @@ docker run -it --rm \
     "${docker_ros_env[@]}" \
     -v "$(pwd)":/workspace \
     --env-file .env \
-    --entrypoint bash \
+    -e LEARNING_MACHINES_WORKSPACE=/workspace \
     learning_machines \
-    -c '
-        source /opt/ros/noetic/setup.bash
-        source /root/catkin_ws/devel/setup.bash
-        source /root/catkin_ws/setup.bash
-        export PYTHONPATH="/workspace/catkin_ws/src/learning_machines/src:/workspace/catkin_ws/src/robobo_interface/src:${PYTHONPATH:-}"
-        cd /workspace
-        python3 -c "import torch, gymnasium, stable_baselines3; print(\"Deployment dependencies:\", torch.__version__, gymnasium.__version__, stable_baselines3.__version__)"
-        exec python3 deploy_hardware.py \
-            --algorithm "$1" \
-            --checkpoint "$2" \
-            --manifest "$3" \
-            --calibration "$4" \
-            "${@:5}"
-    ' bash "$ALGORITHM" "$CHECKPOINT" "$MANIFEST" "$CALIBRATION" "$@"
+    --hardware-deploy \
+    --algorithm "$ALGORITHM" \
+    --checkpoint "$CHECKPOINT" \
+    --manifest "$MANIFEST" \
+    --calibration "$CALIBRATION" \
+    "$@"
