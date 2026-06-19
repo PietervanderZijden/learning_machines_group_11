@@ -44,16 +44,32 @@ class Actor(nn.Module):
         action_dim: int,
         hidden: int = 512,
         layers: int = 3,
-        log_std_min: float = -5.0,
-        log_std_max: float = 2.0,
+        std_min: float = 0.1,
+        std_max: float = 1.0,
+        mean_limit: float = 2.5,
         action_limit: float = 1.0,
     ):
         super().__init__()
         self.action_dim = action_dim
-        self.log_std_min = log_std_min
-        self.log_std_max = log_std_max
+        self.std_min = float(std_min)
+        self.std_max = float(std_max)
+        if not 0 < self.std_min <= self.std_max:
+            raise ValueError("actor standard-deviation bounds are invalid")
+        self.mean_limit = float(mean_limit)
         self.action_limit = action_limit
         self.net = mlp(state_dim, hidden, 2 * action_dim, layers)
+        nn.init.trunc_normal_(self.net[-1].weight, std=0.01)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def _distribution_parameters(
+        self, state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mean, std_param = self.net(state).chunk(2, dim=-1)
+        mean = mean.clamp(-self.mean_limit, self.mean_limit)
+        std = self.std_min + (
+            self.std_max - self.std_min
+        ) * torch.sigmoid(std_param)
+        return mean, std
 
     def forward(self, state: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
         """Sample action from policy.
@@ -61,9 +77,7 @@ class Actor(nn.Module):
         state: (batch, state_dim)
         Returns: (batch, action_dim)
         """
-        out = self.net(state)
-        mean, log_std = out.chunk(2, dim=-1)
-        std = log_std.clamp(self.log_std_min, self.log_std_max).exp()
+        mean, std = self._distribution_parameters(state)
 
         if deterministic:
             action = torch.tanh(mean) * self.action_limit
@@ -84,9 +98,7 @@ class Actor(nn.Module):
         the reported probability inconsistent with the actual sampling distribution.
         Instead, use a stable tanh-normal implementation.
         """
-        out = self.net(state)
-        mean, log_std = out.chunk(2, dim=-1)
-        std = log_std.clamp(self.log_std_min, self.log_std_max).exp()
+        mean, std = self._distribution_parameters(state)
 
         dist = Normal(mean, std)
         # Score-function objective: transitions use detached sampled actions,
@@ -112,9 +124,7 @@ class Actor(nn.Module):
         Returns:
             log_prob: (batch,)
         """
-        out = self.net(state)
-        mean, log_std = out.chunk(2, dim=-1)
-        std = log_std.clamp(self.log_std_min, self.log_std_max).exp()
+        mean, std = self._distribution_parameters(state)
 
         # Inverse tanh to get raw action
         action_clamped = action.clamp(-0.999, 0.999)  # avoid ±1
@@ -132,8 +142,11 @@ class Actor(nn.Module):
         return -log_prob
 
     def std(self, state: torch.Tensor) -> torch.Tensor:
-        _, log_std = self.net(state).chunk(2, dim=-1)
-        return log_std.clamp(self.log_std_min, self.log_std_max).exp()
+        return self._distribution_parameters(state)[1]
+
+    def mean(self, state: torch.Tensor) -> torch.Tensor:
+        mean, _ = self.net(state).chunk(2, dim=-1)
+        return mean.clamp(-self.mean_limit, self.mean_limit)
 
 
 class Critic(nn.Module):
@@ -190,9 +203,10 @@ class ReturnNormalizer:
 def lambda_return(
     rewards: torch.Tensor,
     values: torch.Tensor,
-    continue_logit: torch.Tensor,
-    gamma: float = 0.994009,
+    continue_logit: torch.Tensor | None,
+    gamma: float = 0.997,
     lam: float = 0.95,
+    continuation: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute lambda Returns (TD-lambda) for imagined trajectories.
 
@@ -204,7 +218,12 @@ def lambda_return(
 
     Returns: (batch, horizon) lambda returns in original space
     """
-    continue_prob = torch.sigmoid(continue_logit)
+    if continuation is None:
+        if continue_logit is None:
+            raise ValueError("continue_logit or continuation must be provided")
+        continue_prob = torch.sigmoid(continue_logit)
+    else:
+        continue_prob = continuation
     returns = torch.zeros_like(rewards)
     last = values[:, -1]
 
@@ -215,3 +234,11 @@ def lambda_return(
         returns[:, t] = last
 
     return returns
+
+
+def soft_cross_entropy(
+    logits: torch.Tensor, target_logits: torch.Tensor
+) -> torch.Tensor:
+    """Cross-entropy to a detached categorical target distribution."""
+    target = F.softmax(target_logits.detach(), dim=-1)
+    return -(target * F.log_softmax(logits, dim=-1)).sum(-1)

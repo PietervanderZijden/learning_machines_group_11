@@ -38,6 +38,31 @@ from learning_machines.distributional import _make_bin_centers
 _K_INFERENCE = 4
 
 
+def finite_clip_grad_norm_(
+    parameters, max_norm: float, value_clip: float = 100.0
+) -> float:
+    """Clip finite gradients without float32 norm-overflow poisoning weights."""
+    parameters = [parameter for parameter in parameters if parameter.grad is not None]
+    for parameter in parameters:
+        if not torch.isfinite(parameter.grad).all():
+            raise FloatingPointError("non-finite gradient before optimizer step")
+    nn.utils.clip_grad_value_(parameters, value_clip)
+    norms = [
+        torch.linalg.vector_norm(parameter.grad.detach().double())
+        for parameter in parameters
+    ]
+    total_norm = (
+        torch.linalg.vector_norm(torch.stack(norms)).item() if norms else 0.0
+    )
+    if not np.isfinite(total_norm):
+        raise FloatingPointError("non-finite gradient norm before optimizer step")
+    scale = min(1.0, float(max_norm) / (total_norm + 1e-12))
+    if scale < 1.0:
+        for parameter in parameters:
+            parameter.grad.mul_(scale)
+    return float(total_norm)
+
+
 def _ramp_weight(tau: torch.Tensor) -> torch.Tensor:
     """Ramp loss weight: w(τ) = 0.9τ + 0.1.
 
@@ -631,8 +656,10 @@ class ImageDreamerV4Agent(nn.Module):
         result = self.tokenizer(images, ir)
         loss = result["loss"]
 
+        if not torch.isfinite(loss):
+            raise FloatingPointError("non-finite tokenizer loss")
         loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(
+        grad_norm = finite_clip_grad_norm_(
             self.tokenizer.parameters(), self.grad_clip
         )
         self.tokenizer_optimizer.step()
@@ -641,6 +668,7 @@ class ImageDreamerV4Agent(nn.Module):
             "tok/loss": loss.item(),
             "tok/mse_loss": result["mse_loss"].item(),
             "tok/perceptual_loss": result["perceptual_loss"].item(),
+            "tok/food_saliency_loss": result["food_saliency_loss"].item(),
             "tok/ir_loss": result["ir_loss"].item(),
             "tok/perceptual_metric": result["perceptual_metric"],
             "tok/grad_norm": float(grad_norm),
@@ -809,8 +837,15 @@ class ImageDreamerV4Agent(nn.Module):
             + self._normalize_loss(rew_loss, "dyn_reward_loss_rms")
             + self._normalize_loss(done_loss, "dyn_done_loss_rms")
         )
+        if not all(
+            torch.isfinite(value)
+            for value in (latent_loss, rew_loss, done_loss, total_loss)
+        ):
+            raise FloatingPointError(
+                "non-finite DreamerV4 dynamics loss before backward"
+            )
         total_loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(
+        grad_norm = finite_clip_grad_norm_(
             self.dynamics.parameters(), self.grad_clip
         )
         self.dynamics_optimizer.step()
@@ -823,6 +858,11 @@ class ImageDreamerV4Agent(nn.Module):
             "dyn/done_loss": done_loss.item(),
             "dyn/total_loss": total_loss.item(),
             "dyn/grad_norm": float(grad_norm),
+            "dyn/latent_input_mean": latents.mean().item(),
+            "dyn/latent_input_std": latents.std().item(),
+            "dyn/latent_input_abs_max": latents.abs().max().item(),
+            "dyn/action_input_abs_max": actions.abs().max().item(),
+            "dyn/reward_target_abs_max": rewards.abs().max().item(),
         }
 
     def update_mtp_behavior(
@@ -865,8 +905,10 @@ class ImageDreamerV4Agent(nn.Module):
         action_loss = torch.stack(action_losses).mean()
         reward_loss = torch.stack(reward_losses).mean()
         total_loss = action_loss + reward_loss
+        if not torch.isfinite(total_loss):
+            raise FloatingPointError("non-finite MTP loss before backward")
         total_loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(
+        grad_norm = finite_clip_grad_norm_(
             list(self.prior_actor.parameters())
             + list(self.mtp_feature.parameters())
             + list(self.mtp_reward_head.parameters()),
@@ -996,18 +1038,13 @@ class ImageDreamerV4Agent(nn.Module):
         actor_loss = actor_loss + self.entropy_coef * logp_current.mean()
 
         total_loss = critic_loss + actor_loss
+        if not torch.isfinite(total_loss):
+            raise FloatingPointError("non-finite actor-critic loss before backward")
         total_loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(
+        grad_norm = finite_clip_grad_norm_(
             list(self.actor.parameters()) + list(self.critic.parameters()),
             self.grad_clip,
         )
-
-        if self._has_nan(total_loss):
-            self.ac_optimizer.zero_grad()
-            for module in frozen_modules:
-                for p, req in zip(module.parameters(), prev_requires_grad[module]):
-                    p.requires_grad_(req)
-            return {"ac/critic_loss": 0.0, "ac/actor_loss": 0.0, "ac/return_mean": 0.0}
 
         self.ac_optimizer.step()
         self._soft_update_target()

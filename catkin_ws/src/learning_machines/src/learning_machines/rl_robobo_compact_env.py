@@ -57,7 +57,8 @@ class RoboboCompactEnvConfig:
     smoothing_requested_weight: float = 0.35
     max_action_delta: float = 0.5
     blob_track_max_distance: float = 0.30
-    blob_track_max_missed: int = 3
+    blob_track_max_missed: int = 6
+    active_food_count: int | None = None
 
 
 @dataclass
@@ -284,6 +285,11 @@ class RoboboCompactEnv(gym.Env):
         info["safety_overrides"] = self._safety_override_count
         info["mean_action_change"] = self._action_change_total / self._step_count
         info["action_saturation_rate"] = self._saturation_total / self._step_count
+        info["blob_visible"] = float(obs["blob"][3] > 0.5)
+        info["safety_with_visible_food"] = float(
+            action_info["safety_override"] is not None
+            and obs["blob"][3] > 0.5
+        )
 
         return obs, reward, terminated, truncated, info
 
@@ -310,6 +316,8 @@ class RoboboCompactEnv(gym.Env):
         self._cache_initial_position()
         if self.config.randomize_food_positions:
             self._randomize_food_positions()
+        elif self.config.active_food_count is not None:
+            self._apply_food_curriculum()
 
         self.rob.play_simulation()
         self._fix_lifted_food()
@@ -440,7 +448,14 @@ class RoboboCompactEnv(gym.Env):
 
     def _randomize_food_positions(self) -> None:
         sim = self.rob._sim
-        for h in self._food_handles:
+        active_count = self._active_food_count()
+        for index, h in enumerate(self._food_handles):
+            if index >= active_count:
+                try:
+                    sim.setObjectPosition(h, [self._arena_cx, self._arena_cy, -5.0])
+                except Exception:
+                    pass
+                continue
             placed = False
             for _ in range(20):
                 angle = random.uniform(0, 2 * math.pi)
@@ -462,6 +477,27 @@ class RoboboCompactEnv(gym.Env):
                     sim.setObjectPosition(h, [fx, fy, 0.025])
                 except Exception:
                     pass
+        self._num_food = active_count
+
+    def _active_food_count(self) -> int:
+        if self.config.active_food_count is None:
+            return max(1, len(self._food_handles))
+        return max(
+            1,
+            min(int(self.config.active_food_count), len(self._food_handles)),
+        )
+
+    def _apply_food_curriculum(self) -> None:
+        active_count = self._active_food_count()
+        for index, handle in enumerate(self._food_handles):
+            if index >= active_count:
+                try:
+                    self.rob._sim.setObjectPosition(
+                        handle, [self._arena_cx, self._arena_cy, -5.0]
+                    )
+                except Exception:
+                    pass
+        self._num_food = active_count
 
     def _fix_lifted_food(self) -> None:
         sim = self.rob._sim

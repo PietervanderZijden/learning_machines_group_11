@@ -13,6 +13,7 @@ import argparse
 import atexit
 import datetime
 import json
+import os
 import sys
 import time
 import random
@@ -38,6 +39,7 @@ class EpisodeRef:
     transitions: int
     episode_return: float
     has_ir: bool
+    reward_events: int = 0
 
 
 @dataclass
@@ -255,6 +257,9 @@ def scan_recorded_episodes(
                 transitions=len(episode["actions"]),
                 episode_return=float(np.sum(episode["rewards"])),
                 has_ir="irs" in episode,
+                reward_events=int(
+                    np.count_nonzero(episode["rewards"] >= 1.0)
+                ),
             ))
         except (OSError, KeyError, ValueError) as exc:
             result.skipped.append((str(path), str(exc)))
@@ -394,6 +399,7 @@ def collect_episodes(
     episode_safety = 0
     episode_action_change = 0.0
     episode_saturation = 0.0
+    episode_safety_with_visible_food = 0
     episode_index = 0
 
     for _ in _progress(range(steps), "Collecting"):
@@ -423,6 +429,9 @@ def collect_episodes(
         episode_safety += int(info.get("safety_override") is not None)
         episode_action_change += float(info.get("action_change", 0.0))
         episode_saturation += float(info.get("action_saturation", 0.0))
+        episode_safety_with_visible_food += int(
+            bool(info.get("safety_with_visible_food", False))
+        )
 
         if done:
             episodes.append({k: np.array(v) for k, v in current.items()})
@@ -437,6 +446,7 @@ def collect_episodes(
                 "collection/safety_overrides": episode_safety,
                 "collection/mean_action_change": episode_action_change / max(1, length),
                 "collection/action_saturation_rate": episode_saturation / max(1, length),
+                "collection/safety_with_visible_food": episode_safety_with_visible_food,
             }
             if writer is not None:
                 for key, value in metrics.items():
@@ -468,6 +478,7 @@ def collect_episodes(
             episode_safety = 0
             episode_action_change = 0.0
             episode_saturation = 0.0
+            episode_safety_with_visible_food = 0
 
     if len(current["actions"]) > 0:
         episodes.append({k: np.array(v) for k, v in current.items()})
@@ -518,6 +529,8 @@ def sample_latent_batch(
     context_length: int,
     device: torch.device,
     hardware_sample_ratio: float = 0.25,
+    reward_event_fraction: float = 0.25,
+    reward_event_threshold: float = 1.0,
 ):
     valid = [ep for ep in encoded_episodes if len(ep["actions"]) >= 1]
     if not valid:
@@ -535,7 +548,21 @@ def sample_latent_batch(
         hardware_samples += int(use_hardware)
         n = len(ep["actions"])
         length = min(context_length, n)
-        start = 0 if n == length else random.randint(0, n - length)
+        max_start = n - length
+        event_indices = torch.nonzero(
+            ep["rewards"] >= reward_event_threshold, as_tuple=False
+        ).flatten()
+        request_event = (
+            event_indices.numel() > 0
+            and random.random() < reward_event_fraction
+        )
+        if request_event:
+            event = int(event_indices[random.randrange(event_indices.numel())])
+            lower = max(0, event - length + 1)
+            upper = min(event, max_start)
+            start = random.randint(lower, upper)
+        else:
+            start = 0 if max_start == 0 else random.randint(0, max_start)
         end = start + length
 
         lat = ep["latents"][start:end + 1]
@@ -657,11 +684,15 @@ def evaluate_dynamics(
 def main():
     parser = argparse.ArgumentParser(description="Image-based DreamerV4 training")
     parser.add_argument("--port", type=int, default=23000)
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
+    )
     parser.add_argument("--total-steps", type=int, default=50_000)
     parser.add_argument("--checkpoint-dir", type=str, default="dreamerv4_image_models")
     parser.add_argument("--record-dir", type=str, default="recorded_episodes")
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=3e-5)
+    parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--latent-dim", type=int, default=128)
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--n-heads", type=int, default=4)
@@ -677,6 +708,14 @@ def main():
     parser.add_argument("--hardware-validation-fraction", type=float, default=0.2)
     parser.add_argument("--dataset-seed", type=int, default=0)
     parser.add_argument("--validation-every", type=int, default=1000)
+    parser.add_argument("--reward-event-fraction", type=float, default=0.25)
+    parser.add_argument("--reward-event-threshold", type=float, default=1.0)
+    parser.add_argument(
+        "--zero-reward-episode-fraction",
+        type=float,
+        default=0.25,
+        help="Fraction of simulation episodes without reward events to retain.",
+    )
     parser.add_argument("--save-freq", type=int, default=5000)
     parser.add_argument(
         "--tensorboard",
@@ -701,6 +740,10 @@ def main():
                         help="Disable IR input and train from camera images only")
     parser.add_argument("--wandb-run-name", type=str, default=None)
     args = parser.parse_args()
+    if not 0.0 <= args.reward_event_fraction <= 1.0:
+        parser.error("--reward-event-fraction must be in [0, 1]")
+    if not 0.0 <= args.zero_reward_episode_fraction <= 1.0:
+        parser.error("--zero-reward-episode-fraction must be in [0, 1]")
     if args.online:
         args.offline = False
     else:
@@ -712,8 +755,20 @@ def main():
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "learning_machines" / "src"))
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "robobo_interface" / "src"))
 
-    import os
     os.environ["COPPELIA_SIM_PORT"] = str(args.port)
+    os.environ["COPPELIA_SIM_IP"] = args.host
+    mode = "online" if args.online else "offline"
+    print(
+        f"DreamerV4 effective configuration: mode={mode}, "
+        f"simulator={args.host}:{args.port}",
+        flush=True,
+    )
+    if args.online:
+        from learning_machines.coppelia_startup import check_coppelia_service
+        try:
+            check_coppelia_service(args.host, args.port)
+        except ConnectionError as exc:
+            raise SystemExit(f"CoppeliaSim preflight failed: {exc}") from None
 
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -806,6 +861,17 @@ def main():
             )
         print(f"Resuming from {model_path}")
         agent = ImageDreamerV4Agent.load(str(model_path), device)
+        non_finite_parameters = [
+            name
+            for name, parameter in agent.named_parameters()
+            if not torch.isfinite(parameter).all()
+        ]
+        if non_finite_parameters:
+            raise ValueError(
+                "refusing to resume a numerically poisoned DreamerV4 "
+                f"checkpoint; first invalid parameters: "
+                f"{non_finite_parameters[:5]}. Start with a fresh checkpoint directory."
+            )
         print(f"Resuming phase progress: {asdict(progress)}")
 
     if args.tokenizer_steps > progress.tokenizer and any(
@@ -843,6 +909,10 @@ def main():
                 "hardware_sample_ratio": args.hardware_sample_ratio,
                 "hardware_validation_fraction": args.hardware_validation_fraction,
                 "dataset_seed": args.dataset_seed,
+                "learning_rate": args.lr,
+                "reward_event_fraction": args.reward_event_fraction,
+                "reward_event_threshold": args.reward_event_threshold,
+                "zero_reward_episode_fraction": args.zero_reward_episode_fraction,
             },
         ).save(checkpoint_dir / "manifest.json")
 
@@ -854,6 +924,20 @@ def main():
             expected_phone_tilt=100,
             source="simulation",
         )
+        dataset_rng = random.Random(args.dataset_seed)
+        retained_simulation = [
+            ref
+            for ref in simulation_scan.episodes
+            if ref.reward_events > 0
+            or dataset_rng.random() < args.zero_reward_episode_fraction
+        ]
+        filtered_count = len(simulation_scan.episodes) - len(retained_simulation)
+        simulation_scan.episodes = retained_simulation
+        if filtered_count:
+            print(
+                f"Filtered {filtered_count} zero-reward simulation episodes; "
+                f"retained fraction={args.zero_reward_episode_fraction:.2f}"
+            )
         if not simulation_scan.episodes:
             raise RuntimeError(f"No usable .npz episodes found in {Path(args.record_dir) / 'episodes'}")
         hardware_scan = DatasetScan()
@@ -960,6 +1044,12 @@ def main():
             ref.transitions for ref in dataset.hardware_validation
         ),
         "dataset/skipped_episodes": len(simulation_scan.skipped) + len(hardware_scan.skipped),
+        "dataset/reward_event_episodes": sum(
+            ref.reward_events > 0 for ref in dataset.training_refs
+        ),
+        "dataset/zero_reward_episodes": sum(
+            ref.reward_events == 0 for ref in dataset.training_refs
+        ),
     }
     if wandb_run is not None:
         wandb_run.log({**dataset_metrics, "global_step": progress.global_log_step})
@@ -1043,12 +1133,21 @@ def main():
         batch_latents, batch_actions, batch_rewards, batch_dones, batch_mask, hardware_fraction = sample_latent_batch(
             encoded_episodes, args.batch_size, args.context_length, device,
             args.hardware_sample_ratio,
+            args.reward_event_fraction,
+            args.reward_event_threshold,
         )
 
         dyn_metrics = agent.update_dynamics(
             batch_latents, batch_actions, batch_rewards, batch_dones, batch_mask
         )
         dyn_metrics["dataset/hardware_batch_fraction"] = hardware_fraction
+        dyn_metrics["dataset/reward_event_batch_fraction"] = float(
+            (batch_rewards >= args.reward_event_threshold)
+            .any(dim=1)
+            .float()
+            .mean()
+            .item()
+        )
         _log_metrics(writer, wandb_run, dyn_metrics, progress.global_log_step, "dynamics")
         dynamics_pbar.set_postfix_str(
             _metric_postfix(dyn_metrics, ("dyn/total_loss", "dyn/latent_loss", "dyn/rew_loss")),
@@ -1097,11 +1196,20 @@ def main():
         batch_latents, batch_actions, batch_rewards, _, batch_mask, hardware_fraction = sample_latent_batch(
             encoded_episodes, args.batch_size, args.context_length, device,
             args.hardware_sample_ratio,
+            args.reward_event_fraction,
+            args.reward_event_threshold,
         )
         mtp_metrics = agent.update_mtp_behavior(
             batch_latents, batch_actions, batch_rewards, batch_mask
         )
         mtp_metrics["dataset/hardware_batch_fraction"] = hardware_fraction
+        mtp_metrics["dataset/reward_event_batch_fraction"] = float(
+            (batch_rewards >= args.reward_event_threshold)
+            .any(dim=1)
+            .float()
+            .mean()
+            .item()
+        )
         _log_metrics(writer, wandb_run, mtp_metrics, progress.global_log_step, "mtp")
         mtp_pbar.set_postfix_str(
             _metric_postfix(mtp_metrics, ("mtp/total_loss", "mtp/action_loss", "mtp/reward_loss")),
@@ -1124,6 +1232,8 @@ def main():
         batch_latents, _, _, _, _, hardware_fraction = sample_latent_batch(
             encoded_episodes, args.batch_size, args.context_length, device,
             args.hardware_sample_ratio,
+            args.reward_event_fraction,
+            args.reward_event_threshold,
         )
         ac_metrics = agent.update_actor_critic(batch_latents[:, 0])
         ac_metrics["dataset/hardware_batch_fraction"] = hardware_fraction

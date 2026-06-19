@@ -255,6 +255,7 @@ class WorldModel(nn.Module):
             h_init, z_init = self.initial_state(batch, obs_seq.device)
 
         h_list, z_list = [], []
+        state_all = []
         prior_logits_list, posterior_logits_list = [], []
         obs_pred_list = []
         reward_logits_list = []
@@ -278,6 +279,7 @@ class WorldModel(nn.Module):
         zero_action = torch.zeros(batch, self.action_dim, device=obs_seq.device)
         ir0 = ir_seq[:, 0] if ir_seq is not None else None
         h, z, _, _ = observe_one(obs_seq[:, 0], zero_action, ir0)
+        state_all.append(torch.cat([h, z], dim=-1))
 
         for t in range(seq_len):
             obs_next = obs_seq[:, t + 1]
@@ -290,6 +292,7 @@ class WorldModel(nn.Module):
             posterior_logits_list.append(posterior_logits)
 
             state = torch.cat([h, z], dim=-1)
+            state_all.append(state)
 
             # Decode current observation from posterior state.
             obs_pred = self.obs_decoder(state)
@@ -314,6 +317,7 @@ class WorldModel(nn.Module):
             "obs_pred": torch.stack(obs_pred_list, dim=1),  # reconstructs obs[:, 1:]
             "reward_logits": torch.stack(reward_logits_list, dim=1),  # (batch, seq_len, NUM_BINS)
             "continue_pred": torch.stack(continue_list, dim=1),  # (batch, seq_len)
+            "state_all": torch.stack(state_all, dim=1),  # posterior states s_0..s_T
         }
         if self.use_multimodal:
             result["ir_pred"] = torch.stack(ir_pred_list, dim=1)

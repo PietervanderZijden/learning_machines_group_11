@@ -33,17 +33,22 @@ clip(polarity * (raw - free_space) /
 
 ## Training
 
-SAC receives only the 12 deployable blob+IR values. Dreamer receives calibrated
-IR alongside its image input. SAC replay stores the policy-requested action,
+SAC receives the 12 deployable blob+IR values plus the previous two executed
+wheel commands. The 14-value input makes deployment smoothing and actuator
+latency observable without exposing food count. Dreamer receives calibrated IR
+alongside its image input. SAC replay stores the policy-requested action,
 because smoothing and safety are environment dynamics; it separately logs the
 executed action. Dreamer sequence data stores executed actions for world-model
 prediction.
 
 SAC uses bounded potential-difference shaping from blob alignment and apparent
-proximity, scales training rewards by `0.01`, caps the completion bonus, uses a
-fixed entropy coefficient, and clips actor/critic gradients. The raw task
-reward remains available in logs. HER is not used because food annotations and
-food count are not policy inputs.
+proximity, suppresses shaping when the tracked target switches, scales training
+rewards by `0.01`, caps the completion bonus, uses a fixed entropy coefficient
+of `0.01`, and clips actor/critic gradients. Its default curriculum trains with
+1 food, then 3, then all 7, and enables full domain randomization after the
+fixed-domain stages. These changes require fresh SAC checkpoints; 12-value SAC
+checkpoints are not resumed. The raw task reward remains available in logs.
+HER is not used because food annotations and food count are not policy inputs.
 
 ```bash
 python train_sac.py --calibration config/calibration/simulation.json
@@ -51,9 +56,36 @@ python train_dreamerv3.py --calibration config/calibration/simulation.json
 python train_dreamerv4_image.py --online --calibration config/calibration/simulation.json
 ```
 
+Recommended fresh runs after the stability-contract change:
+
+```bash
+./run_sac.sh --checkpoint-dir results/sac-v2-checkpoints
+./run_dreamerv3.sh --checkpoint-dir results/dreamer-v3-v2-checkpoints
+CHECKPOINT_DIR=results/dreamer-v4-v2-checkpoints ./run_dreamerv4.sh
+```
+
+The simulator launchers default to `127.0.0.1:23000`, print the effective
+destination, use unbuffered Python output, and fail quickly if the ZMQ service
+is unreachable. Override a remote simulator explicitly with
+`--host ADDRESS --port PORT`. DreamerV4 is offline by default and therefore
+does not connect to CoppeliaSim unless `--online` is supplied.
+
+Do not resume the previous DreamerV4 checkpoint whose dynamics losses became
+`NaN`; resume now explicitly rejects checkpoints containing non-finite
+parameters.
+
+DreamerV3 interprets `--train-ratio` as replay transitions trained per
+environment transition. The default `512` with batch 32 and sequence length 50
+produces 0.32 optimizer updates per environment step. Its actor mean, standard
+deviation, and gradient norm are bounded, and `dreamerv3_best.pt` tracks the
+best rolling food score separately from `dreamerv3_latest.pt`.
+
 Offline DreamerV4 training streams images from disk and retains encoded
 latents on CPU instead of allocating the complete dataset on the GPU. The
 default launcher uses the DreamerV3 recordings and 50,000 dynamics updates.
+Reward-event windows are oversampled. Every optimizer phase rejects non-finite
+losses or gradients before changing parameters, and gradient norms are
+calculated in float64 to avoid overflow.
 
 When hardware episodes become available:
 
@@ -112,6 +144,9 @@ readings, then saves a timestamped report and camera frame under
 On Linux it uses host networking. On macOS Docker Desktop it publishes the
 fixed ROS callback ports `45100` and `45101`; `ROS_IP` must remain the Mac's
 LAN address, not a container address.
+If a topic times out, the report resolves its publisher's XML-RPC and TCPROS
+addresses and tests both endpoints. ROS1 publishers use dynamic ports, so
+successful access to port `11311` alone does not prove topic connectivity.
 
 Create the measured IR profile while the robot remains stationary:
 
@@ -137,6 +172,9 @@ Only test motors with the robot physically raised and every wheel clear:
 
 The wheel test requires typing `WHEELS RAISED`, caps speed at 20, caps each
 command at 500 ms, and sends stop commands before, between, and after tests.
+If ROS connects but the robot publishes no IR messages, isolate base actuation
+with `--skip-ir --test-wheels --wheels-raised`. This diagnostic bypass is
+deliberately rejected for calibration and all non-raised-wheel operation.
 
 ```bash
 ./run_hardware_deploy.sh \

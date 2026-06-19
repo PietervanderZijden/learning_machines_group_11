@@ -170,7 +170,7 @@ class RSSM(nn.Module):
 
     def kl_loss(
         self, prior_logits: torch.Tensor, posterior_logits: torch.Tensor,
-        free_nats: float = 1.0, kl_balance: float = 0.8
+        free_nats: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """KL divergence losses with free nats and KL balance.
 
@@ -178,8 +178,6 @@ class RSSM(nn.Module):
           L_dyn = max(1, KL[sg(q(z|h,x)) || p(z|h)])
           L_rep = max(1, KL[q(z|h,x) || sg(p(z|h))])
 
-        KL balance (0.8) scales the stop-gradient side of each loss to prevent
-        one term from dominating optimization.
         Unimix is applied to prevent overconfident predictions.
 
         Returns: (L_dyn, L_rep) — both scalar

@@ -203,6 +203,22 @@ class ImageTokenizer(nn.Module):
         self.register_buffer("image_loss_rms", torch.tensor(1.0))
         self.register_buffer("ir_loss_rms", torch.tensor(1.0))
 
+    @staticmethod
+    def _green_saliency_loss(
+        reconstruction: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        recon_green = torch.relu(
+            reconstruction[:, 1]
+            - torch.maximum(reconstruction[:, 0], reconstruction[:, 2])
+        )
+        target_green = torch.relu(
+            target[:, 1] - torch.maximum(target[:, 0], target[:, 2])
+        )
+        weights = 1.0 + 20.0 * (target_green > 0.1).float()
+        return (
+            (recon_green - target_green).square() * weights
+        ).sum() / weights.sum()
+
     def _normalize_loss(self, loss: torch.Tensor, rms_name: str) -> torch.Tensor:
         """RMS-normalize objective terms without backpropagating through the scale."""
         rms = getattr(self, rms_name)
@@ -305,6 +321,7 @@ class ImageTokenizer(nn.Module):
         with torch.no_grad():
             _, features_original = self.encoder(image, return_features=True)
         perceptual_loss = self.perceptual_loss(features_recon, features_original)
+        food_saliency_loss = self._green_saliency_loss(recon, image)
 
         if self.ir_encoder is not None and ir is not None:
             ir_latent = self.ir_encoder(ir)
@@ -319,7 +336,7 @@ class ImageTokenizer(nn.Module):
 
         # Combined loss: MSE + 0.2 * LPIPS when available. This implementation
         # reports and uses the encoder-feature fallback instead of pretrained LPIPS.
-        image_loss = mse_loss + 0.2 * perceptual_loss
+        image_loss = mse_loss + 0.2 * perceptual_loss + 2.0 * food_saliency_loss
         total_loss = self._normalize_loss(image_loss, "image_loss_rms")
         if self.ir_decoder is not None and ir is not None:
             total_loss = total_loss + self._normalize_loss(ir_loss, "ir_loss_rms")
@@ -331,6 +348,7 @@ class ImageTokenizer(nn.Module):
             "loss": total_loss,
             "mse_loss": mse_loss,
             "perceptual_loss": perceptual_loss,
+            "food_saliency_loss": food_saliency_loss,
             "ir_loss": ir_loss,
             "perceptual_metric": "fallback_encoder_features",
         }

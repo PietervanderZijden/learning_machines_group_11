@@ -19,6 +19,7 @@ import shutil
 import sys
 import datetime
 import zipfile
+from collections import deque
 from pathlib import Path
 
 import gymnasium as gym
@@ -108,6 +109,10 @@ class RoboboSACEnv(gym.Env):
         shaping_scale=5.0,
         emergency_override_penalty=1.0,
         calibration_path=None,
+        curriculum=True,
+        curriculum_one_food_steps=100_000,
+        curriculum_three_food_steps=250_000,
+        randomization_start_steps=300_000,
     ):
         super().__init__()
         from learning_machines.rl_robobo_compact_env import (
@@ -122,20 +127,29 @@ class RoboboSACEnv(gym.Env):
             collision_penalty=collision_penalty,
             action_change_penalty=action_change_penalty,
             calibration_path=calibration_path,
+            active_food_count=1 if curriculum else None,
         )
         inner = RoboboCompactEnv(rob=rob, config=self._config)
+        self._domain_wrapper = None
         if domain_randomization:
             from learning_machines.domain_randomization import DomainRandomizationWrapper
-            inner = DomainRandomizationWrapper(
-                inner, enabled=True, ranges=randomization_ranges
+            self._domain_wrapper = DomainRandomizationWrapper(
+                inner, enabled=not curriculum, ranges=randomization_ranges
             )
+            inner = self._domain_wrapper
         self._inner = inner
+        self.curriculum = bool(curriculum)
+        self.curriculum_one_food_steps = int(curriculum_one_food_steps)
+        self.curriculum_three_food_steps = int(curriculum_three_food_steps)
+        self.randomization_start_steps = int(randomization_start_steps)
+        self._previous_executed_action = np.zeros(2, dtype=np.float32)
+        self._previous_blob_switches = 0
         self.reward_scale = float(reward_scale)
         self.shaping_scale = float(shaping_scale)
         self.emergency_override_penalty = float(emergency_override_penalty)
         self._previous_potential = 0.0
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(12,), dtype=np.float32,
+            low=-1.0, high=1.0, shape=(14,), dtype=np.float32,
         )
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(2,), dtype=np.float32,
@@ -144,7 +158,27 @@ class RoboboSACEnv(gym.Env):
     def _flatten_obs(self, obs_dict):
         blob = obs_dict["blob"]
         ir = obs_dict["ir"]
-        return np.concatenate([blob, ir]).astype(np.float32)
+        return np.concatenate(
+            [blob, ir, self._previous_executed_action]
+        ).astype(np.float32)
+
+    def set_curriculum_step(self, step: int) -> dict[str, float]:
+        if not self.curriculum:
+            return {"active_food_count": 7.0, "randomization_enabled": 1.0}
+        if step < self.curriculum_one_food_steps:
+            active_food = 1
+        elif step < self.curriculum_three_food_steps:
+            active_food = 3
+        else:
+            active_food = 7
+        self._config.active_food_count = active_food
+        randomization_enabled = step >= self.randomization_start_steps
+        if self._domain_wrapper is not None:
+            self._domain_wrapper.enabled = randomization_enabled
+        return {
+            "active_food_count": float(active_food),
+            "randomization_enabled": float(randomization_enabled),
+        }
 
     def _get_food_count(self, info):
         return float(info.get("food_collected", 0))
@@ -152,12 +186,17 @@ class RoboboSACEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         obs_dict, info = self._inner.reset(seed=seed, options=options)
         from learning_machines.transfer import blob_progress_potential
+        self._previous_executed_action.fill(0.0)
+        self._previous_blob_switches = int(info.get("blob_target_switches", 0))
         self._previous_potential = blob_progress_potential(obs_dict["blob"])
         return self._flatten_obs(obs_dict), info
 
     def step(self, action):
         from learning_machines.transfer import blob_progress_potential
         obs_dict, raw_reward, terminated, truncated, info = self._inner.step(action)
+        self._previous_executed_action = np.asarray(
+            info.get("executed_action", action), dtype=np.float32
+        ).copy()
         food = self._get_food_count(info)
         obs = self._flatten_obs(obs_dict)
         info = dict(info)
@@ -172,7 +211,10 @@ class RoboboSACEnv(gym.Env):
         )
         info.setdefault("collision_penalty", 0.0)
         next_potential = blob_progress_potential(obs_dict["blob"])
-        if info["newly_collected"] > 0:
+        blob_switches = int(info.get("blob_target_switches", 0))
+        target_switched = blob_switches > self._previous_blob_switches
+        self._previous_blob_switches = blob_switches
+        if info["newly_collected"] > 0 or target_switched:
             shaping_reward = 0.0
         else:
             shaping_reward = self.shaping_scale * (
@@ -192,6 +234,7 @@ class RoboboSACEnv(gym.Env):
         info["safety_override_penalty"] = emergency_cost
         info["unscaled_training_reward"] = unscaled_training_reward
         info["training_reward"] = training_reward
+        info["blob_target_switched"] = float(target_switched)
         return obs, training_reward, terminated, truncated, info
 
     def close(self):
@@ -203,6 +246,10 @@ def main():
     parser.add_argument("--total-timesteps", type=int, default=500_000)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--port", type=int, default=23000)
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
+    )
     parser.add_argument("--max-episode-steps", type=int, default=150)
     parser.add_argument("--checkpoint-dir", type=str, default="sac_models")
     parser.add_argument("--learning-starts", type=int, default=2000)
@@ -221,7 +268,7 @@ def main():
     parser.add_argument("--reward-scale", type=float, default=0.01)
     parser.add_argument("--shaping-scale", type=float, default=5.0)
     parser.add_argument("--emergency-override-penalty", type=float, default=1.0)
-    parser.add_argument("--entropy-coefficient", type=float, default=0.1)
+    parser.add_argument("--entropy-coefficient", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--calibration", default="config/calibration/simulation.json")
     parser.add_argument(
@@ -237,6 +284,14 @@ def main():
         help="Enable persistent sensor/actuator and per-step randomization",
     )
     parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument(
+        "--curriculum",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--curriculum-one-food-steps", type=int, default=100_000)
+    parser.add_argument("--curriculum-three-food-steps", type=int, default=250_000)
+    parser.add_argument("--randomization-start-steps", type=int, default=300_000)
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent
@@ -244,9 +299,36 @@ def main():
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "robobo_interface" / "src"))
 
     os.environ["COPPELIA_SIM_PORT"] = str(args.port)
+    os.environ["COPPELIA_SIM_IP"] = args.host
+    print(
+        f"SAC effective configuration: simulator={args.host}:{args.port}",
+        flush=True,
+    )
+    from learning_machines.coppelia_startup import check_coppelia_service
+    try:
+        check_coppelia_service(args.host, args.port)
+    except ConnectionError as exc:
+        raise SystemExit(f"CoppeliaSim preflight failed: {exc}") from None
 
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    existing_manifest_path = checkpoint_dir / "manifest.json"
+    if existing_manifest_path.exists():
+        from learning_machines.transfer import CheckpointManifest
+
+        existing_manifest = CheckpointManifest.load(existing_manifest_path)
+        existing_dim = existing_manifest.algorithm_config.get("observation_dim")
+        if existing_dim != 14:
+            raise ValueError(
+                f"{checkpoint_dir} contains a legacy {existing_dim}-value SAC "
+                "run. Use a fresh checkpoint directory for the 14-value "
+                "control-state observation contract."
+            )
+        if not args.resume and any(checkpoint_dir.glob("sac*.zip")):
+            raise ValueError(
+                f"{checkpoint_dir} already contains SAC checkpoints. "
+                "Pass --resume or choose a fresh checkpoint directory."
+            )
 
     log_dir = checkpoint_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -305,11 +387,55 @@ def main():
             }, allow_val_change=True)
 
     class TransferMetricsCallback(BaseCallback):
+        def __init__(self):
+            super().__init__()
+            self.episode_food = deque(maxlen=100)
+            self.best_food_mean = float("-inf")
+            best_path = checkpoint_dir / "best_metrics.json"
+            if best_path.exists():
+                try:
+                    self.best_food_mean = float(
+                        json.loads(best_path.read_text())["rolling_food_mean"]
+                    )
+                except (
+                    OSError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ):
+                    pass
+
         def _on_step(self) -> bool:
+            curriculum_metrics = {}
+            base_env = self.training_env.envs[0].unwrapped
+            if hasattr(base_env, "set_curriculum_step"):
+                curriculum_metrics = base_env.set_curriculum_step(
+                    self.num_timesteps
+                )
             infos = self.locals.get("infos", [])
             if not infos:
                 return True
             info = infos[0]
+            dones = self.locals.get("dones", [])
+            if len(dones) and bool(dones[0]):
+                self.episode_food.append(float(info.get("food_collected", 0.0)))
+                if len(self.episode_food) >= 20:
+                    rolling_food = float(np.mean(self.episode_food))
+                    if rolling_food > self.best_food_mean:
+                        self.best_food_mean = rolling_food
+                        self.model.save(str(checkpoint_dir / "sac_best"))
+                        (checkpoint_dir / "best_metrics.json").write_text(
+                            json.dumps(
+                                {
+                                    "global_step": self.num_timesteps,
+                                    "rolling_episodes": len(self.episode_food),
+                                    "rolling_food_mean": rolling_food,
+                                },
+                                indent=2,
+                            )
+                            + "\n"
+                        )
             metrics = {
                 "rollout/elapsed_seconds": info.get("elapsed_seconds"),
                 "rollout/food_collected": info.get("food_collected"),
@@ -327,6 +453,20 @@ def main():
                 "rollout/training_reward": info.get("training_reward"),
                 "rollout/blob_target_confidence": info.get("blob_target_confidence"),
                 "rollout/blob_target_switches": info.get("blob_target_switches"),
+                "rollout/blob_target_switched": info.get("blob_target_switched"),
+                "rollout/safety_with_visible_food": info.get(
+                    "safety_with_visible_food"
+                ),
+                "curriculum/active_food_count": curriculum_metrics.get(
+                    "active_food_count"
+                ),
+                "curriculum/randomization_enabled": curriculum_metrics.get(
+                    "randomization_enabled"
+                ),
+                "rollout/food_mean_100": (
+                    float(np.mean(self.episode_food))
+                    if self.episode_food else None
+                ),
             }
             metrics = {key: float(value) for key, value in metrics.items() if value is not None}
             for key, value in metrics.items():
@@ -353,10 +493,14 @@ def main():
                         "observations/blob_y": float(vector[1]),
                         "observations/blob_area": float(vector[2]),
                         "observations/blob_found": float(vector[3]),
+                        "observations/previous_executed_left": float(vector[12]),
+                        "observations/previous_executed_right": float(vector[13]),
                     })
                     if self.num_timesteps % 100 == 0:
                         import wandb
-                        payload["observations/ir_histogram"] = wandb.Histogram(vector[4:])
+                        payload["observations/ir_histogram"] = wandb.Histogram(
+                            vector[4:12]
+                        )
                         if "raw_ir" in info:
                             payload["observations/raw_ir_histogram"] = wandb.Histogram(
                                 info["raw_ir"]
@@ -380,6 +524,10 @@ def main():
             shaping_scale=args.shaping_scale,
             emergency_override_penalty=args.emergency_override_penalty,
             calibration_path=args.calibration,
+            curriculum=args.curriculum,
+            curriculum_one_food_steps=args.curriculum_one_food_steps,
+            curriculum_three_food_steps=args.curriculum_three_food_steps,
+            randomization_start_steps=args.randomization_start_steps,
         ),
         filename=str(log_dir / "monitor.csv"),
         info_keywords=(
@@ -403,6 +551,8 @@ def main():
             "action_saturation_rate",
             "blob_target_confidence",
             "blob_target_switches",
+            "blob_target_switched",
+            "safety_with_visible_food",
         ),
     )
 
@@ -431,11 +581,13 @@ def main():
             100,
         )
         required = {
+            "observation_dim": 14,
             "reward_scale": args.reward_scale,
             "shaping_scale": args.shaping_scale,
             "emergency_override_penalty": args.emergency_override_penalty,
             "entropy_coefficient": args.entropy_coefficient,
             "max_grad_norm": args.max_grad_norm,
+            "curriculum": args.curriculum,
         }
         if manifest.reward_contract != "robobo-reward-v4":
             raise ValueError(
@@ -544,7 +696,7 @@ def main():
                 "learning_rate": args.learning_rate,
                 "batch_size": args.batch_size,
                 "buffer_size": args.buffer_size,
-                "observation_dim": 12,
+                "observation_dim": 14,
                 "domain_randomization": args.domain_randomization,
                 "hardware_calibration": args.hardware_calibration,
                 "time_penalty_per_second": args.time_penalty_per_second,
@@ -556,6 +708,10 @@ def main():
                 "entropy_coefficient": args.entropy_coefficient,
                 "max_grad_norm": args.max_grad_norm,
                 "gamma": 0.9801,
+                "curriculum": args.curriculum,
+                "curriculum_one_food_steps": args.curriculum_one_food_steps,
+                "curriculum_three_food_steps": args.curriculum_three_food_steps,
+                "randomization_start_steps": args.randomization_start_steps,
             },
         ).save(checkpoint_dir / "manifest.json")
         if wandb_run is not None:

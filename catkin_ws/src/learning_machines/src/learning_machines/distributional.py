@@ -115,5 +115,7 @@ def logits_to_value(logits: torch.Tensor) -> torch.Tensor:
     """
     bins = _make_bin_centers(logits.device)
     probs = F.softmax(logits, dim=-1)
-    symlog_value = (probs * bins).sum(-1)
-    return symexp(symlog_value)
+    # The categorical distribution lives on symexp-transformed bin values.
+    # Taking symexp after averaging the symlog bins is incorrect because
+    # symexp is nonlinear and systematically biases broad distributions.
+    return (probs * symexp(bins)).sum(-1)

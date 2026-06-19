@@ -74,10 +74,10 @@ class SimulationRobobo(IRobobo):
         if api_port is None:
             api_port = int(os.getenv("COPPELIA_SIM_PORT", "23000"))
 
-        # 0.0.0.0 to connect to the current computer on Linux, with `--net=host`
-        # This doesn't work on Windows or MacOS. There, the variable needs to be specified.
+        # 127.0.0.1 is the correct destination when CoppeliaSim runs locally.
+        # 0.0.0.0 is a server bind address and is not a portable client target.
         if ip_adress is None:
-            ip_adress = os.getenv("COPPELIA_SIM_IP", "0.0.0.0")
+            ip_adress = os.getenv("COPPELIA_SIM_IP", "127.0.0.1")
 
         # The RemoteAPIClient waits indefinetly, but I want some way to show an error.
         # It closes the connection when it gets garbage collected, so no need to close

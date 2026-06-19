@@ -60,11 +60,25 @@ class SACPolicy(Policy):
     def __init__(self, checkpoint: str):
         from stable_baselines3 import SAC
         self.model = SAC.load(checkpoint)
+        self.previous_executed = np.zeros(2, dtype=np.float32)
+        self.observation_dim = int(self.model.observation_space.shape[0])
+        if self.observation_dim not in (12, 14):
+            raise ValueError(
+                f"unsupported SAC observation dimension: {self.observation_dim}"
+            )
+
+    def reset(self):
+        self.previous_executed.fill(0.0)
 
     def act(self, obs: dict) -> np.ndarray:
         vector = np.concatenate([obs["blob"], obs["ir"]]).astype(np.float32)
+        if self.observation_dim == 14:
+            vector = np.concatenate([vector, self.previous_executed])
         action, _ = self.model.predict(vector, deterministic=True)
         return np.asarray(action, dtype=np.float32)
+
+    def observe_executed(self, action: np.ndarray):
+        self.previous_executed = np.asarray(action, dtype=np.float32).copy()
 
 
 class DreamerV3Policy(Policy):
@@ -155,6 +169,15 @@ def main():
         args.image_size,
         args.phone_tilt,
     )
+    if (
+        args.algorithm == "sac"
+        and manifest.algorithm_config.get("observation_dim") != 14
+    ):
+        raise ValueError(
+            "hardware deployment requires the 14-value SAC observation "
+            "contract with previous executed wheel commands; retrain the "
+            "legacy checkpoint"
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.algorithm == "sac":

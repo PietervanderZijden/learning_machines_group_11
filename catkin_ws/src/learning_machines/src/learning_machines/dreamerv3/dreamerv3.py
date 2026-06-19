@@ -24,11 +24,62 @@ import torch.nn.functional as F
 from learning_machines.distributional import (
     symlog, symexp, two_hot_loss, logits_to_value,
 )
-from .actor_critic import Actor, Critic, ReturnNormalizer, lambda_return
+from .actor_critic import (
+    Actor,
+    Critic,
+    ReturnNormalizer,
+    lambda_return,
+    soft_cross_entropy,
+)
 from .config import DreamerV3Config
+from .optim import LaProp, adaptive_clip_grad_
 from .replay_buffer import ReplayBuffer
 from .rssm import RSSM
 from .world_model import WorldModel
+
+
+def green_saliency_loss(
+    prediction: torch.Tensor, target: torch.Tensor
+) -> torch.Tensor:
+    """Preserve small green food regions that global image MSE can ignore."""
+    pred_green = torch.relu(
+        prediction[..., 1, :, :]
+        - torch.maximum(prediction[..., 0, :, :], prediction[..., 2, :, :])
+    )
+    target_green = torch.relu(
+        target[..., 1, :, :]
+        - torch.maximum(target[..., 0, :, :], target[..., 2, :, :])
+    )
+    weights = 1.0 + 20.0 * (target_green > 0.1).float()
+    return ((pred_green - target_green).square() * weights).sum() / weights.sum()
+
+
+def select_imagination_starts(
+    state_sequence: torch.Tensor,
+    rewards: torch.Tensor,
+    count: int,
+    reward_threshold: float,
+) -> torch.Tensor:
+    """Select replay states while ensuring food-event states are represented."""
+    batch, transitions_plus_one, state_dim = state_sequence.shape
+    transitions = transitions_plus_one - 1
+    candidates = state_sequence[:, :transitions]
+    if count <= 0 or count >= transitions:
+        return candidates.reshape(batch * transitions, state_dim)
+
+    base = torch.linspace(
+        0, transitions - 1, count, device=state_sequence.device
+    ).round().long()
+    indices = base.unsqueeze(0).expand(batch, -1).clone()
+    for batch_index in range(batch):
+        events = torch.nonzero(
+            rewards[batch_index] >= reward_threshold, as_tuple=False
+        ).flatten()
+        if events.numel():
+            retained = events[-count:]
+            indices[batch_index, : retained.numel()] = retained
+    gather_index = indices.unsqueeze(-1).expand(-1, -1, state_dim)
+    return candidates.gather(1, gather_index).reshape(batch * count, state_dim)
 
 
 class DreamerV3:
@@ -74,6 +125,17 @@ class DreamerV3:
             action_dim=cfg.action_dim,
             hidden=cfg.actor_hidden,
             layers=cfg.actor_layers,
+            std_min=getattr(
+                cfg,
+                "actor_std_min",
+                float(np.exp(getattr(cfg, "actor_log_std_min", -2.302585))),
+            ),
+            std_max=getattr(
+                cfg,
+                "actor_std_max",
+                float(np.exp(getattr(cfg, "actor_log_std_max", 0.0))),
+            ),
+            mean_limit=getattr(cfg, "actor_mean_limit", 100.0),
         ).to(self.device)
 
         self.critic = Critic(
@@ -92,15 +154,30 @@ class DreamerV3:
         # Return normalizer for actor loss
         self.return_normalizer = ReturnNormalizer(decay=0.99)
 
-        # Optimizers
-        self.world_optim = torch.optim.Adam(
-            self.world_model.parameters(), lr=cfg.world_lr, eps=1e-5
+        # Paper-style LaProp is the default. Adam remains available for old
+        # experiments and checkpoint migration.
+        self.optimizer_name = getattr(cfg, "optimizer", "laprop").lower()
+        if self.optimizer_name == "laprop":
+            optimizer = LaProp
+            optimizer_kwargs = {
+                "eps": getattr(cfg, "optimizer_eps", 1e-20),
+                "warmup_steps": getattr(cfg, "optimizer_warmup", 1000),
+            }
+        elif self.optimizer_name == "adam":
+            optimizer = torch.optim.Adam
+            optimizer_kwargs = {"eps": getattr(cfg, "optimizer_eps", 1e-5)}
+        else:
+            raise ValueError(
+                f"Unsupported DreamerV3 optimizer: {self.optimizer_name}"
+            )
+        self.world_optim = optimizer(
+            self.world_model.parameters(), lr=cfg.world_lr, **optimizer_kwargs
         )
-        self.actor_optim = torch.optim.Adam(
-            self.actor.parameters(), lr=cfg.actor_lr, eps=1e-5
+        self.actor_optim = optimizer(
+            self.actor.parameters(), lr=cfg.actor_lr, **optimizer_kwargs
         )
-        self.critic_optim = torch.optim.Adam(
-            self.critic.parameters(), lr=cfg.critic_lr, eps=1e-5
+        self.critic_optim = optimizer(
+            self.critic.parameters(), lr=cfg.critic_lr, **optimizer_kwargs
         )
 
         # Replay buffer - use image shape if using images
@@ -216,6 +293,9 @@ class DreamerV3:
         if self.cfg.use_multimodal:
             obs_target = obs[:, 1: 1 + wm_out["obs_pred"].shape[1]]
             image_recon_loss = F.mse_loss(wm_out["obs_pred"], obs_target)
+            food_recon_loss = green_saliency_loss(
+                wm_out["obs_pred"], obs_target
+            )
             if ir is None or "ir_pred" not in wm_out:
                 ir_recon_loss = torch.zeros((), device=obs.device)
             else:
@@ -223,17 +303,28 @@ class DreamerV3:
                 # would make deployment preprocessing differ from training.
                 ir_target = ir[:, 1: 1 + wm_out["ir_pred"].shape[1]]
                 ir_recon_loss = F.mse_loss(wm_out["ir_pred"], ir_target)
-            recon_loss = image_recon_loss + ir_recon_loss
+            recon_loss = (
+                image_recon_loss
+                + getattr(self.cfg, "food_recon_weight", 0.0) * food_recon_loss
+                + ir_recon_loss
+            )
         elif self.cfg.use_images:
             obs_target = obs[:, 1: 1 + wm_out["obs_pred"].shape[1]]
-            recon_loss = F.mse_loss(wm_out["obs_pred"], obs_target)
-            image_recon_loss = recon_loss
+            image_recon_loss = F.mse_loss(wm_out["obs_pred"], obs_target)
+            food_recon_loss = green_saliency_loss(
+                wm_out["obs_pred"], obs_target
+            )
+            recon_loss = (
+                image_recon_loss
+                + getattr(self.cfg, "food_recon_weight", 0.0) * food_recon_loss
+            )
             ir_recon_loss = torch.zeros((), device=obs.device)
         else:
             obs_target_symlog = symlog(obs[:, 1: 1 + wm_out["obs_pred"].shape[1]])
             recon_loss = F.mse_loss(wm_out["obs_pred"], obs_target_symlog)
             image_recon_loss = recon_loss
             ir_recon_loss = torch.zeros((), device=obs.device)
+            food_recon_loss = torch.zeros((), device=obs.device)
 
         # Reward prediction loss
         # two_hot_loss handles symlog internally — pass RAW rewards
@@ -257,7 +348,7 @@ class DreamerV3:
         posterior_logits = wm_out["posterior_logits"].reshape(-1, self.world_model.rssm.stochastic_size)
         kl_dyn, kl_rep = self.world_model.rssm.kl_loss(
             prior_logits, posterior_logits,
-            self.cfg.free_nats, self.cfg.kl_balance
+            self.cfg.free_nats,
         )
         with torch.no_grad():
             raw_kl = self.world_model.rssm.raw_kl(prior_logits, posterior_logits)
@@ -273,7 +364,14 @@ class DreamerV3:
 
         self.world_optim.zero_grad()
         wm_loss.backward()
-        wm_grad_norm = nn.utils.clip_grad_norm_(self.world_model.parameters(), self.cfg.grad_clip)
+        if getattr(self.cfg, "agc", 0.0) > 0:
+            wm_grad_norm = adaptive_clip_grad_(
+                self.world_model.parameters(), self.cfg.agc
+            )
+        else:
+            wm_grad_norm = nn.utils.clip_grad_norm_(
+                self.world_model.parameters(), self.cfg.grad_clip
+            )
         self.world_optim.step()
         self.world_optim.zero_grad(set_to_none=True)
 
@@ -287,8 +385,14 @@ class DreamerV3:
                 obs, action,
                 ir_seq=ir if ir is not None else None,
             )
-            h_start = wm_out_detached["h"][:, -1]
-            z_start = wm_out_detached["z"][:, -1]
+            start_states = select_imagination_starts(
+                wm_out_detached["state_all"],
+                reward,
+                getattr(self.cfg, "imagination_starts", 0),
+                self.cfg.reward_event_threshold,
+            )
+            h_start = start_states[:, : self.cfg.deterministic_size]
+            z_start = start_states[:, self.cfg.deterministic_size :]
 
         # Imagine trajectory — returns log-probs for the ACTUAL imagined actions
         imag_out = self.world_model.imagine_trajectory(
@@ -307,21 +411,26 @@ class DreamerV3:
         imag_logits = self.critic(states_flat).reshape(batch_size_imag, horizon, -1)
         imag_values = logits_to_value(imag_logits)  # (B, H)
 
-        # Bootstrap value from target critic
+        # Lambda-return bootstraps use the online critic, while the slow critic
+        # is reserved for the paper's critic regularization term.
         with torch.no_grad():
             last_state = torch.cat([imag_out["h"][:, -1], imag_out["z"][:, -1]], dim=-1)
-            bootstrap_logits = self.critic_target(last_state)
-            bootstrap = logits_to_value(bootstrap_logits).unsqueeze(1)  # (B, 1)
-
-        # Lambda returns
-        values_with_bootstrap = torch.cat([
-            imag_values,
-            bootstrap,
-        ], dim=1)[:, :horizon + 1]
+            target_state_sequence = torch.cat(
+                [states, last_state.unsqueeze(1)], dim=1
+            )
+            last_value = logits_to_value(
+                self.critic(last_state)
+            ).unsqueeze(1)
+            return_values = torch.cat(
+                [imag_values.detach(), last_value], dim=1
+            )
+            target_imag_logits = self.critic_target(
+                target_state_sequence.reshape(-1, state_dim)
+            ).reshape(batch_size_imag, horizon + 1, -1)
 
         returns = lambda_return(
             imag_rewards,
-            values_with_bootstrap,
+            return_values,
             imag_out["continue_logit"],
             gamma=self.cfg.gamma,
             lam=self.cfg.lam,
@@ -335,32 +444,111 @@ class DreamerV3:
         with torch.no_grad():
             S = self.return_normalizer.update(returns)
             advantages = (returns - imag_values.detach()) / S
-            advantages = torch.clamp(advantages, -5.0, 5.0)
+            advantage_clip = getattr(self.cfg, "advantage_clip", 0.0)
+            if advantage_clip > 0:
+                advantages = torch.clamp(
+                    advantages, -advantage_clip, advantage_clip
+                )
+            continuation = torch.sigmoid(imag_out["continue_logit"])
+            trajectory_weights = torch.ones_like(continuation)
+            if horizon > 1:
+                trajectory_weights[:, 1:] = torch.cumprod(
+                    self.cfg.gamma * continuation[:, :-1], dim=1
+                )
+            weight_normalizer = trajectory_weights.sum().clamp_min(1.0)
 
         # REINFORCE loss — use log-probs of the ACTUAL imagined actions
-        actor_loss = -(advantages.detach() * log_probs).mean()
+        actor_loss = -(
+            trajectory_weights * advantages.detach() * log_probs
+        ).sum() / weight_normalizer
 
         # Entropy bonus
         actor_entropy = -log_probs
-        actor_loss -= self.cfg.entropy_weight * actor_entropy.mean()
+        actor_loss -= self.cfg.entropy_weight * (
+            trajectory_weights * actor_entropy
+        ).sum() / weight_normalizer
 
         self.actor_optim.zero_grad()
         actor_loss.backward()
-        actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.grad_clip)
+        if getattr(self.cfg, "agc", 0.0) > 0:
+            actor_grad_norm = adaptive_clip_grad_(
+                self.actor.parameters(), self.cfg.agc
+            )
+        else:
+            actor_grad_norm = nn.utils.clip_grad_norm_(
+                self.actor.parameters(), self.cfg.grad_clip
+            )
         self.actor_optim.step()
 
-        # === Critic Loss: two-hot distributional on lambda-returns ===
-        # Paper Eq 5: L(ψ) = -Σ ln p_ψ(R_t^λ | s_t)
-        # two_hot_loss handles symlog internally — pass RAW returns
+        # === Critic Loss: imagination + replay + slow regularization ===
         critic_logits = self.critic(states_flat.detach()).reshape(batch_size_imag, horizon, -1)
-        critic_loss = two_hot_loss(
+        imag_value_loss_per_step = two_hot_loss(
             critic_logits.reshape(-1, critic_logits.shape[-1]),
             returns.detach().reshape(-1),
+            reduction="none",
+        ).reshape(batch_size_imag, horizon)
+        imag_slow_loss = soft_cross_entropy(
+            critic_logits, target_imag_logits[:, :-1]
         )
+        slow_regularization = getattr(
+            self.cfg, "slow_value_regularization", 1.0
+        )
+        imag_critic_loss = (
+            trajectory_weights
+            * (imag_value_loss_per_step + slow_regularization * imag_slow_loss)
+        ).sum() / weight_normalizer
+
+        # Replay value learning anchors the critic to real rewards. The
+        # reward-event replay sampler makes this especially useful for sparse
+        # food pickups.
+        replay_states = wm_out_detached["state_all"]
+        replay_state_dim = replay_states.shape[-1]
+        replay_logits = self.critic(
+            replay_states[:, :-1].reshape(-1, replay_state_dim).detach()
+        ).reshape(batch_size, seq_len, -1)
+        with torch.no_grad():
+            replay_last_value = logits_to_value(
+                self.critic(replay_states[:, -1].detach())
+            ).unsqueeze(1)
+            replay_return_values = torch.cat(
+                [logits_to_value(replay_logits.detach()), replay_last_value],
+                dim=1,
+            )
+            replay_target_logits = self.critic_target(
+                replay_states.reshape(-1, replay_state_dim)
+            ).reshape(batch_size, seq_len + 1, -1)
+            replay_returns = lambda_return(
+                reward,
+                replay_return_values,
+                None,
+                gamma=self.cfg.gamma,
+                lam=self.cfg.lam,
+                continuation=1.0 - done.float(),
+            )
+        replay_value_loss = two_hot_loss(
+            replay_logits.reshape(-1, replay_logits.shape[-1]),
+            replay_returns.reshape(-1),
+        )
+        replay_slow_loss = soft_cross_entropy(
+            replay_logits, replay_target_logits[:, :-1]
+        ).mean()
+        replay_critic_loss = (
+            replay_value_loss + slow_regularization * replay_slow_loss
+        )
+        critic_loss = imag_critic_loss + getattr(
+            self.cfg, "replay_value_weight", 0.3
+        ) * replay_critic_loss
 
         self.critic_optim.zero_grad()
         critic_loss.backward()
-        critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.grad_clip)
+        if getattr(self.cfg, "agc", 0.0) > 0:
+            critic_grad_norm = adaptive_clip_grad_(
+                self.critic.parameters(), self.cfg.agc
+            )
+        else:
+            critic_grad_norm = nn.utils.clip_grad_norm_(
+                self.critic.parameters(), self.cfg.grad_clip
+            )
         self.critic_optim.step()
 
         # Update target critic (EMA)
@@ -379,16 +567,25 @@ class DreamerV3:
             "recon_loss": recon_loss.item(),
             "image_recon_loss": image_recon_loss.item(),
             "ir_recon_loss": ir_recon_loss.item(),
+            "food_recon_loss": food_recon_loss.item(),
             "reward_loss": reward_loss.item(),
             "continue_loss": continue_loss.item(),
             "kl_dyn": kl_dyn.item(),
             "kl_rep": kl_rep.item(),
             "actor_loss": actor_loss.item(),
             "critic_loss": critic_loss.item(),
+            "critic_imagination_loss": imag_critic_loss.item(),
+            "critic_replay_loss": replay_critic_loss.item(),
+            "critic_replay_value_loss": replay_value_loss.item(),
+            "critic_slow_regularization": (
+                imag_slow_loss.mean() + replay_slow_loss
+            ).item(),
             "actor_entropy": actor_entropy.mean().item(),
             "imag_returns": returns.mean().item(),
             "return_range": S,
+            "imagination_starts": batch_size_imag,
             "actor_std": self.actor.std(states_flat).mean().item(),
+            "actor_mean_abs": self.actor.mean(states_flat).abs().mean().item(),
             "action_saturation": (imag_out["action"].abs() >= 0.99).float().mean().item(),
             "advantage_p05": torch.quantile(advantages, 0.05).item(),
             "advantage_p50": torch.quantile(advantages, 0.50).item(),
@@ -411,6 +608,7 @@ class DreamerV3:
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
             "critic_target": self.critic_target.state_dict(),
+            "optimizer_type": self.optimizer_name,
             "world_optim": self.world_optim.state_dict(),
             "actor_optim": self.actor_optim.state_dict(),
             "critic_optim": self.critic_optim.state_dict(),
@@ -433,9 +631,16 @@ class DreamerV3:
         self.actor.load_state_dict(ckpt["actor"])
         self.critic.load_state_dict(ckpt["critic"])
         self.critic_target.load_state_dict(ckpt["critic_target"])
-        self.world_optim.load_state_dict(ckpt["world_optim"])
-        self.actor_optim.load_state_dict(ckpt["actor_optim"])
-        self.critic_optim.load_state_dict(ckpt["critic_optim"])
+        checkpoint_optimizer = ckpt.get("optimizer_type", "adam")
+        if checkpoint_optimizer == self.optimizer_name:
+            self.world_optim.load_state_dict(ckpt["world_optim"])
+            self.actor_optim.load_state_dict(ckpt["actor_optim"])
+            self.critic_optim.load_state_dict(ckpt["critic_optim"])
+        else:
+            print(
+                f"DreamerV3 optimizer changed from {checkpoint_optimizer} to "
+                f"{self.optimizer_name}; optimizer moments were reset."
+            )
         self.return_normalizer.range = ckpt.get("return_normalizer_range", 1.0)
         self._global_step = ckpt.get("global_step", 0)
         self._train_calls = ckpt.get("train_calls", 0)

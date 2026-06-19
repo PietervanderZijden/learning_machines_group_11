@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import sys
 import time
@@ -46,6 +47,16 @@ def _as_float(value):
     if isinstance(value, (int, float, np.number)):
         return float(value)
     return None
+
+
+def dreamer_updates_per_env_step(
+    replay_ratio: float, batch_size: int, sequence_length: int
+) -> float:
+    if replay_ratio < 0:
+        raise ValueError("replay ratio must be non-negative")
+    if batch_size <= 0 or sequence_length <= 0:
+        raise ValueError("batch size and sequence length must be positive")
+    return replay_ratio / (batch_size * sequence_length)
 
 
 def _fmt_value(value) -> str:
@@ -171,8 +182,10 @@ class TrainingLogger:
         if self._last_train_losses:
             loss_keys = [
                 "wm_loss", "recon_loss", "image_recon_loss", "ir_recon_loss",
-                "reward_loss", "continue_loss",
+                "food_recon_loss", "reward_loss", "continue_loss",
                 "kl_dyn", "kl_rep", "actor_loss", "critic_loss",
+                "critic_imagination_loss", "critic_replay_loss",
+                "critic_replay_value_loss", "critic_slow_regularization",
             ]
             self._add_section(
                 lines,
@@ -181,6 +194,8 @@ class TrainingLogger:
             )
             diagnostic_keys = [
                 "actor_entropy", "imag_returns", "return_range", "actor_std",
+                "actor_mean_abs",
+                "imagination_starts",
                 "action_saturation", "advantage_p05", "advantage_p50",
                 "advantage_p95", "world_grad_norm", "actor_grad_norm",
                 "critic_grad_norm", "raw_kl_mean", "raw_kl_median",
@@ -212,6 +227,10 @@ def main():
     parser.add_argument("--total-steps", type=int, default=500_000)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--port", type=int, default=23000)
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
+    )
     parser.add_argument("--max-episode-steps", type=int, default=150)
     parser.add_argument("--checkpoint-dir", type=str, default="dreamerv3_models")
     parser.add_argument("--no-wandb", action="store_true")
@@ -223,7 +242,15 @@ def main():
     parser.add_argument("--wandb-run-name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--prefill-steps", type=int, default=5000)
-    parser.add_argument("--train-ratio", type=int, default=512)
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=512.0,
+        help=(
+            "Replay transitions trained per environment transition. "
+            "Updates/step = train_ratio / (batch_size * sequence_length)."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--sequence-length", type=int, default=50)
     parser.add_argument(
@@ -238,7 +265,26 @@ def main():
         default=1.0,
         help="Raw reward at which a replay transition is treated as a reward event.",
     )
-    parser.add_argument("--world-learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=4e-5)
+    parser.add_argument(
+        "--world-learning-rate",
+        type=float,
+        default=None,
+        help="Deprecated world-model-only override; defaults to --learning-rate.",
+    )
+    parser.add_argument("--grad-clip", type=float, default=100.0)
+    parser.add_argument("--agc", type=float, default=0.3)
+    parser.add_argument("--actor-std-min", type=float, default=0.1)
+    parser.add_argument("--actor-std-max", type=float, default=1.0)
+    parser.add_argument("--actor-mean-limit", type=float, default=2.5)
+    parser.add_argument(
+        "--imagination-starts",
+        type=int,
+        default=8,
+        help="Replay states per sequence used to start dreams; 0 uses all states.",
+    )
+    parser.add_argument("--replay-value-weight", type=float, default=0.3)
+    parser.add_argument("--buffer-capacity", type=int, default=100_000)
     parser.add_argument("--checkpoint-every", type=int, default=10000)
     parser.add_argument("--log-interval", type=int, default=2048)
     parser.add_argument("--record-dir", type=str, default="recorded_episodes",
@@ -249,14 +295,44 @@ def main():
                         help="Image size for recording (default: 64x64)")
     parser.add_argument("--calibration", default="config/calibration/simulation.json")
     parser.add_argument("--hardware-calibration", default=None)
+    parser.add_argument(
+        "--curriculum",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--curriculum-one-food-steps", type=int, default=100_000)
+    parser.add_argument("--curriculum-three-food-steps", type=int, default=250_000)
+    parser.add_argument("--randomization-start-steps", type=int, default=300_000)
     args = parser.parse_args()
+    if args.learning_rate <= 0:
+        parser.error("--learning-rate must be positive")
+    if args.world_learning_rate is not None and args.world_learning_rate <= 0:
+        parser.error("--world-learning-rate must be positive")
+    if not 0 < args.actor_std_min <= args.actor_std_max:
+        parser.error("actor std bounds must satisfy 0 < min <= max")
+    if args.imagination_starts < 0:
+        parser.error("--imagination-starts must be non-negative")
+    if args.replay_value_weight < 0:
+        parser.error("--replay-value-weight must be non-negative")
+    if args.agc < 0:
+        parser.error("--agc must be non-negative")
 
     project_root = Path(__file__).resolve().parent
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "learning_machines" / "src"))
     sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "robobo_interface" / "src"))
 
     os.environ["COPPELIA_SIM_PORT"] = str(args.port)
-    print(f"DreamerV3 effective configuration: port={args.port}")
+    os.environ["COPPELIA_SIM_IP"] = args.host
+    print(
+        f"DreamerV3 effective configuration: "
+        f"simulator={args.host}:{args.port}",
+        flush=True,
+    )
+    from learning_machines.coppelia_startup import check_coppelia_service
+    try:
+        check_coppelia_service(args.host, args.port)
+    except ConnectionError as exc:
+        raise SystemExit(f"CoppeliaSim preflight failed: {exc}") from None
 
     # Wandb
     wandb_run = None
@@ -282,16 +358,29 @@ def main():
     from learning_machines.domain_randomization import RandomizationRanges
     from learning_machines.transfer import CalibrationProfile, CheckpointManifest
 
-    # Config - use smaller buffer for images to avoid memory issues
+    # Config - use smaller buffer and a bounded number of imagination starts
+    # for the image-based Robobo workload.
+    world_learning_rate = (
+        args.world_learning_rate
+        if args.world_learning_rate is not None
+        else args.learning_rate
+    )
     cfg = DreamerV3Config(
         obs_dim=12,
         action_dim=2,
         sequence_length=args.sequence_length,
         batch_size=args.batch_size,
-        world_lr=args.world_learning_rate,
-        actor_lr=1e-4,
-        critic_lr=1e-4,
-        buffer_capacity=10_000,  # Smaller for images
+        world_lr=world_learning_rate,
+        actor_lr=args.learning_rate,
+        critic_lr=args.learning_rate,
+        buffer_capacity=args.buffer_capacity,
+        grad_clip=args.grad_clip,
+        agc=args.agc,
+        actor_std_min=args.actor_std_min,
+        actor_std_max=args.actor_std_max,
+        actor_mean_limit=args.actor_mean_limit,
+        imagination_starts=args.imagination_starts,
+        replay_value_weight=args.replay_value_weight,
         reward_event_fraction=args.reward_event_fraction,
         reward_event_threshold=args.reward_event_threshold,
         use_images=True,
@@ -316,6 +405,10 @@ def main():
             "world_lr": cfg.world_lr,
             "actor_lr": cfg.actor_lr,
             "critic_lr": cfg.critic_lr,
+            "optimizer": cfg.optimizer,
+            "agc": cfg.agc,
+            "imagination_starts": cfg.imagination_starts,
+            "replay_value_weight": cfg.replay_value_weight,
         }, allow_val_change=True)
 
     # Environment
@@ -324,6 +417,7 @@ def main():
         return_image=True,
         image_obs_size=(args.image_size, args.image_size),
         calibration_path=args.calibration,
+        active_food_count=1 if args.curriculum else None,
     )
     rob_env = RoboboCompactEnv(config=env_config)
     randomization_ranges = None
@@ -336,7 +430,27 @@ def main():
             wandb_run.config.update({
                 "derived_randomization_ranges": randomization_ranges.__dict__,
             }, allow_val_change=True)
-    env = DomainRandomizationWrapper(rob_env, ranges=randomization_ranges)
+    env = DomainRandomizationWrapper(
+        rob_env,
+        enabled=not args.curriculum,
+        ranges=randomization_ranges,
+    )
+
+    def apply_curriculum(step: int) -> tuple[int, bool]:
+        if not args.curriculum:
+            return 7, True
+        if step < args.curriculum_one_food_steps:
+            active_food = 1
+        elif step < args.curriculum_three_food_steps:
+            active_food = 3
+        else:
+            active_food = 7
+        env_config.active_food_count = active_food
+        randomization_enabled = step >= args.randomization_start_steps
+        env.enabled = randomization_enabled
+        return active_food, randomization_enabled
+
+    apply_curriculum(agent.global_step)
 
     # Image episode recorder
     record_dir = Path(args.record_dir)
@@ -357,6 +471,7 @@ def main():
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     model_path = checkpoint_dir / "dreamerv3_latest.pt"
+    best_model_path = checkpoint_dir / "dreamerv3_best.pt"
 
     # Tensorboard
     log_dir = checkpoint_dir / "logs"
@@ -488,6 +603,17 @@ def main():
     episode_safety_overrides = 0
     episode_action_change = 0.0
     episode_saturation = 0.0
+    episode_safety_with_visible_food = 0
+    update_budget = 0.0
+    best_food_mean = float("-inf")
+    best_metrics_path = checkpoint_dir / "best_metrics.json"
+    if best_metrics_path.exists():
+        try:
+            best_food_mean = float(
+                json.loads(best_metrics_path.read_text())["rolling_food_mean"]
+            )
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            best_food_mean = float("-inf")
     policy_state = None
     agent.reset_policy_state()
 
@@ -548,6 +674,9 @@ def main():
             episode_safety_overrides += int(info.get("safety_override") is not None)
             episode_action_change += float(info.get("action_change", 0.0))
             episode_saturation += float(info.get("action_saturation", 0.0))
+            episode_safety_with_visible_food += int(
+                bool(info.get("safety_with_visible_food", False))
+            )
             agent.global_step += 1
 
             logger.update(1)
@@ -555,6 +684,26 @@ def main():
             if done:
                 food = info.get("food_collected", 0)
                 logger.record_episode(episode_reward, episode_length, food)
+                if len(logger.episode_foods) >= 20:
+                    rolling_food_mean = float(np.mean(logger.episode_foods))
+                    if rolling_food_mean > best_food_mean:
+                        best_food_mean = rolling_food_mean
+                        agent.save(best_model_path)
+                        best_metrics_path.write_text(
+                            json.dumps(
+                                {
+                                    "global_step": agent.global_step,
+                                    "rolling_episodes": len(logger.episode_foods),
+                                    "rolling_food_mean": best_food_mean,
+                                },
+                                indent=2,
+                            )
+                            + "\n"
+                        )
+                        tqdm.write(
+                            f"[Checkpoint] New best rolling food mean "
+                            f"{best_food_mean:.3f} at step {agent.global_step:,}"
+                        )
                 episode_metrics = {
                     "episode/return": float(episode_reward),
                     "episode/length": int(episode_length),
@@ -565,7 +714,29 @@ def main():
                     "episode/safety_overrides": int(episode_safety_overrides),
                     "episode/mean_action_change": episode_action_change / max(1, episode_length),
                     "episode/action_saturation_rate": episode_saturation / max(1, episode_length),
+                    "episode/safety_with_visible_food": int(
+                        episode_safety_with_visible_food
+                    ),
+                    "episode/food_mean_100": float(
+                        np.mean(logger.episode_foods)
+                    ),
+                    "episode/best_food_mean_100": float(
+                        best_food_mean
+                        if np.isfinite(best_food_mean)
+                        else np.mean(logger.episode_foods)
+                    ),
                 }
+                active_food, randomization_enabled = apply_curriculum(
+                    agent.global_step
+                )
+                episode_metrics.update(
+                    {
+                        "curriculum/active_food_count": active_food,
+                        "curriculum/randomization_enabled": float(
+                            randomization_enabled
+                        ),
+                    }
+                )
                 for key, value in episode_metrics.items():
                     writer.add_scalar(key, value, agent.global_step)
                 if wandb_run is not None:
@@ -624,6 +795,7 @@ def main():
                 episode_safety_overrides = 0
                 episode_action_change = 0.0
                 episode_saturation = 0.0
+                episode_safety_with_visible_food = 0
                 policy_state = None
                 agent.reset_policy_state()
                 obs_dict, info = env.reset()
@@ -639,49 +811,63 @@ def main():
 
             # === Train world model + actor-critic ===
             if agent.global_step >= args.prefill_steps:
-                steps_since_prefill = agent.global_step - args.prefill_steps
-                if steps_since_prefill % args.train_ratio == 0:
-                    if agent.buffer.size >= cfg.sequence_length:
-                        batch = agent.buffer.sample(cfg.batch_size, agent.device)
-                        losses = agent.train_step(batch)
-                        losses["reward_event_sample_fraction"] = float(
-                            batch["reward_event_sample_fraction"].item()
+                target_updates = dreamer_updates_per_env_step(
+                    args.train_ratio, cfg.batch_size, cfg.sequence_length
+                )
+                update_budget += target_updates
+                updates_this_step = 0
+                while (
+                    update_budget >= 1.0
+                    and agent.buffer.size >= cfg.sequence_length
+                    and updates_this_step < 8
+                ):
+                    update_budget -= 1.0
+                    updates_this_step += 1
+                    batch = agent.buffer.sample(cfg.batch_size, agent.device)
+                    losses = agent.train_step(batch)
+                    if not all(np.isfinite(float(value)) for value in losses.values()):
+                        raise RuntimeError(
+                            f"non-finite DreamerV3 training metrics: {losses}"
                         )
+                    losses["reward_event_sample_fraction"] = float(
+                        batch["reward_event_sample_fraction"].item()
+                    )
+                    losses["updates_per_env_step_target"] = target_updates
 
-                        for k, v in losses.items():
-                            writer.add_scalar(f"train/{k}", v, agent.global_step)
-                        if wandb_run is not None:
-                            payload = {f"train/{k}": float(v) for k, v in losses.items()}
-                            if agent.global_step % args.log_interval == 0:
-                                import wandb
-                                from learning_machines.distributional import logits_to_value
-                                with torch.no_grad():
-                                    diagnostic = agent.world_model.observe_sequence(
-                                        batch["obs"],
-                                        batch["action"],
-                                        ir_seq=batch.get("ir"),
-                                    )
-                                if cfg.use_images or cfg.use_multimodal:
-                                    original = batch["obs"][0, 1].detach().cpu()
-                                    reconstruction = diagnostic["obs_pred"][0, 0].detach().cpu()
-                                    payload["diagnostics/original_frame"] = wandb.Image(
-                                        original.permute(1, 2, 0).numpy()
-                                    )
-                                    payload["diagnostics/reconstructed_frame"] = wandb.Image(
-                                        reconstruction.permute(1, 2, 0).numpy()
-                                    )
-                                predicted_reward = logits_to_value(
-                                    diagnostic["reward_logits"]
-                                ).detach().cpu().numpy()
-                                payload["diagnostics/predicted_reward_histogram"] = wandb.Histogram(
-                                    predicted_reward
+                    for k, v in losses.items():
+                        writer.add_scalar(f"train/{k}", v, agent.global_step)
+                    if wandb_run is not None:
+                        payload = {f"train/{k}": float(v) for k, v in losses.items()}
+                        if agent.global_step % args.log_interval == 0:
+                            import wandb
+                            from learning_machines.distributional import logits_to_value
+                            with torch.no_grad():
+                                diagnostic = agent.world_model.observe_sequence(
+                                    batch["obs"],
+                                    batch["action"],
+                                    ir_seq=batch.get("ir"),
                                 )
-                                payload["diagnostics/actual_reward_histogram"] = wandb.Histogram(
-                                    batch["reward"].detach().cpu().numpy()
+                            if cfg.use_images or cfg.use_multimodal:
+                                original = batch["obs"][0, 1].detach().cpu()
+                                reconstruction = diagnostic["obs_pred"][0, 0].detach().cpu()
+                                payload["diagnostics/original_frame"] = wandb.Image(
+                                    original.permute(1, 2, 0).numpy()
                                 )
-                            payload["global_step"] = agent.global_step
-                            wandb_run.log(payload)
-                        logger.record_train(losses)
+                                payload["diagnostics/reconstructed_frame"] = wandb.Image(
+                                    reconstruction.permute(1, 2, 0).numpy()
+                                )
+                            predicted_reward = logits_to_value(
+                                diagnostic["reward_logits"]
+                            ).detach().cpu().numpy()
+                            payload["diagnostics/predicted_reward_histogram"] = wandb.Histogram(
+                                predicted_reward
+                            )
+                            payload["diagnostics/actual_reward_histogram"] = wandb.Histogram(
+                                batch["reward"].detach().cpu().numpy()
+                            )
+                        payload["global_step"] = agent.global_step
+                        wandb_run.log(payload)
+                    logger.record_train(losses)
 
             # === Periodic log ===
             logger.maybe_log(agent.global_step)
@@ -714,6 +900,21 @@ def main():
                 "gamma": cfg.gamma,
                 "reward_event_fraction": cfg.reward_event_fraction,
                 "reward_event_threshold": cfg.reward_event_threshold,
+                "train_ratio": args.train_ratio,
+                "buffer_capacity": cfg.buffer_capacity,
+                "grad_clip": cfg.grad_clip,
+                "actor_std_min": cfg.actor_std_min,
+                "actor_std_max": cfg.actor_std_max,
+                "actor_mean_limit": cfg.actor_mean_limit,
+                "optimizer": cfg.optimizer,
+                "agc": cfg.agc,
+                "imagination_starts": cfg.imagination_starts,
+                "replay_value_weight": cfg.replay_value_weight,
+                "food_recon_weight": cfg.food_recon_weight,
+                "curriculum": args.curriculum,
+                "curriculum_one_food_steps": args.curriculum_one_food_steps,
+                "curriculum_three_food_steps": args.curriculum_three_food_steps,
+                "randomization_start_steps": args.randomization_start_steps,
             },
         ).save(checkpoint_dir / "manifest.json")
         logger.close()

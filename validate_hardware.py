@@ -297,7 +297,9 @@ def _wait_for_topic_message(topic: str, message_type: Any, timeout: float) -> tu
         subscriber.unregister()
 
 
-def _wait_for_ros(timeout: float, include_camera: bool) -> dict[str, Any]:
+def _wait_for_ros(
+    timeout: float, include_camera: bool, skip_ir: bool = False
+) -> dict[str, Any]:
     import rospy
     from robobo_msgs.msg import IRs
     from sensor_msgs.msg import CompressedImage
@@ -308,24 +310,30 @@ def _wait_for_ros(timeout: float, include_camera: bool) -> dict[str, Any]:
         rospy.wait_for_service(service, timeout=timeout)
         result["services"][service] = {"latency_seconds": time.monotonic() - started}
 
-    started = time.monotonic()
-    print(
-        "Waiting for /robot/irs. Move an object past the front and rear sensors "
-        "because Robobo sensor topics may publish only when readings change."
-    )
-    try:
-        _message, connections = _wait_for_topic_message("/robot/irs", IRs, timeout)
-    except TimeoutError as exc:
-        diagnostics = _topic_endpoint_diagnostics("/robot/irs")
-        diagnostics["subscriber_error"] = str(exc)
-        raise RuntimeError(
-            "Timed out waiting for /robot/irs. ROS endpoint diagnostics:\n"
-            + json.dumps(diagnostics, indent=2)
-        ) from exc
-    result["topics"]["/robot/irs"] = {
-        "latency_seconds": time.monotonic() - started,
-        "subscriber_connections": connections,
-    }
+    if skip_ir:
+        result["topics"]["/robot/irs"] = {
+            "skipped": True,
+            "warning": "IR data was not validated and must not be used.",
+        }
+    else:
+        started = time.monotonic()
+        print(
+            "Waiting for /robot/irs. Move an object past the front and rear sensors "
+            "because Robobo sensor topics may publish only when readings change."
+        )
+        try:
+            _message, connections = _wait_for_topic_message("/robot/irs", IRs, timeout)
+        except TimeoutError as exc:
+            diagnostics = _topic_endpoint_diagnostics("/robot/irs")
+            diagnostics["subscriber_error"] = str(exc)
+            raise RuntimeError(
+                "Timed out waiting for /robot/irs. ROS endpoint diagnostics:\n"
+                + json.dumps(diagnostics, indent=2)
+            ) from exc
+        result["topics"]["/robot/irs"] = {
+            "latency_seconds": time.monotonic() - started,
+            "subscriber_connections": connections,
+        }
     if include_camera:
         started = time.monotonic()
         try:
@@ -359,6 +367,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sensor-seconds", type=float, default=5.0)
     parser.add_argument("--sample-hz", type=float, default=10.0)
     parser.add_argument("--no-camera", action="store_true")
+    parser.add_argument(
+        "--skip-ir",
+        action="store_true",
+        help="Diagnostic only: bypass IR waiting for a guarded raised-wheel test.",
+    )
     parser.add_argument("--test-tilt", action="store_true")
     parser.add_argument("--tilt-position", type=int, default=100)
     parser.add_argument("--calibrate-ir", action="store_true")
@@ -379,6 +392,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.test_wheels and not args.wheels_raised:
         raise SystemExit("--test-wheels requires --wheels-raised")
+    if args.skip_ir and not (args.test_wheels and args.wheels_raised):
+        raise SystemExit("--skip-ir is only allowed with --test-wheels --wheels-raised")
+    if args.skip_ir and args.calibrate_ir:
+        raise SystemExit("--skip-ir cannot be combined with --calibrate-ir")
     if not 1 <= args.wheel_speed <= 20:
         raise SystemExit("--wheel-speed must be between 1 and 20")
     if not 0.1 <= args.wheel_duration <= 0.5:
@@ -398,15 +415,25 @@ def main(argv: list[str] | None = None) -> int:
         from robobo_interface import HardwareRobobo
 
         robot = HardwareRobobo(camera=not args.no_camera)
-        ros_result = _wait_for_ros(args.timeout, include_camera=not args.no_camera)
+        ros_result = _wait_for_ros(
+            args.timeout,
+            include_camera=not args.no_camera,
+            skip_ir=args.skip_ir,
+        )
         camera_message = ros_result.pop("camera_message", None)
         report["ros"] = ros_result
 
-        ir_samples = _collect_ir(robot, args.sensor_seconds, args.sample_hz)
-        report["ir"] = {
-            "sample_count": int(len(ir_samples)),
-            "sensors": summarize_ir(ir_samples),
-        }
+        if args.skip_ir:
+            report["ir"] = {
+                "skipped": True,
+                "warning": "Robot-side IR publishing is still unresolved.",
+            }
+        else:
+            ir_samples = _collect_ir(robot, args.sensor_seconds, args.sample_hz)
+            report["ir"] = {
+                "sample_count": int(len(ir_samples)),
+                "sensors": summarize_ir(ir_samples),
+            }
         report["battery"] = {
             "robot_percent": float(robot.robot_battery()),
             "phone_percent": float(robot.phone_battery()),

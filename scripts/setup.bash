@@ -13,5 +13,5 @@ export ROS_XMLRPC_PORT="45100"
 export ROS_TCPROS_PORT="45101"
 
 # Simulation only. This does not affect physical-hardware validation.
-export COPPELIA_SIM_IP="10.15.2.224"
+export COPPELIA_SIM_IP="192.168.0.241"
  
