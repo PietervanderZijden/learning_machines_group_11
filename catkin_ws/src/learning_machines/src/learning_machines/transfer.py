@@ -193,18 +193,50 @@ class SafetyConfig:
     reverse_speed: float = 0.35
     turn_speed: float = 0.45
     front_indices: tuple[int, ...] = (2, 3, 4, 5, 7)
+    food_approach_enabled: bool = True
+    food_center_tolerance: float = 0.22
+    food_min_area: float = 0.002
+    food_approach_speed: float = 0.25
 
 
 class PreActionSafetyFilter:
     def __init__(self, config: SafetyConfig | None = None):
         self.config = config or SafetyConfig()
 
-    def filter(self, requested: np.ndarray, normalized_ir: np.ndarray) -> tuple[np.ndarray, str | None]:
+    def filter(
+        self,
+        requested: np.ndarray,
+        normalized_ir: np.ndarray,
+        blob: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, str | None]:
         action = np.clip(np.asarray(requested, dtype=np.float32), -1.0, 1.0)
         ir = np.asarray(normalized_ir, dtype=np.float32)
         front = ir[list(self.config.front_indices)]
         maximum = float(front.max(initial=0.0))
         if maximum >= self.config.critical_threshold:
+            food = (
+                np.asarray(blob, dtype=np.float32)
+                if blob is not None else np.zeros(4, dtype=np.float32)
+            )
+            centered_food = (
+                self.config.food_approach_enabled
+                and food.shape == (4,)
+                and food[3] > 0.5
+                and food[2] >= self.config.food_min_area
+                and abs(float(food[0]) - 0.5)
+                <= self.config.food_center_tolerance
+            )
+            side_pressure = float(ir[[2, 3, 5, 7]].max(initial=0.0))
+            center_is_closest = float(ir[4]) >= side_pressure
+            moving_forward = float(np.mean(action)) > 0.0
+            if centered_food and center_is_closest and moving_forward:
+                scale = self.config.food_approach_speed / max(
+                    self.config.food_approach_speed,
+                    float(np.max(np.abs(action))),
+                )
+                approach = action * min(1.0, scale)
+                approach = np.maximum(approach, 0.0)
+                return approach.astype(np.float32), "food_approach_speed_reduction"
             left_pressure = float(ir[[2, 7]].max(initial=0.0))
             right_pressure = float(ir[[3, 5]].max(initial=0.0))
             turn = self.config.turn_speed if left_pressure >= right_pressure else -self.config.turn_speed
@@ -235,10 +267,13 @@ class ActionExecutor:
         self,
         requested: np.ndarray,
         normalized_ir: np.ndarray,
+        blob: np.ndarray | None = None,
         emergency: bool = False,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         requested = np.clip(np.asarray(requested, dtype=np.float32), -1.0, 1.0)
-        safe, safety_event = self.safety.filter(requested, normalized_ir)
+        safe, safety_event = self.safety.filter(
+            requested, normalized_ir, blob=blob
+        )
         if emergency or safety_event == "emergency_reverse_turn":
             executed = safe
         else:

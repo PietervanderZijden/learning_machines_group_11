@@ -60,6 +60,7 @@ class RoboboCompactEnvConfig:
     blob_track_max_distance: float = 0.30
     blob_track_max_missed: int = 6
     active_food_count: int | None = None
+    hardware_blocking_commands: bool = True
 
 
 @dataclass
@@ -132,6 +133,7 @@ class RoboboCompactEnv(gym.Env):
         )
         self.action_executor = ActionExecutor(smoothing=smoothing)
         self._latest_ir = np.zeros(8, dtype=np.float32)
+        self._latest_blob = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
         self._elapsed_seconds = 0.0
         self._collision_count = 0
         self._safety_override_count = 0
@@ -199,7 +201,9 @@ class RoboboCompactEnv(gym.Env):
     def step(self, action):
         self._step_count += 1
         requested_action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
-        action, action_info = self.action_executor.execute(requested_action, self._latest_ir)
+        action, action_info = self.action_executor.execute(
+            requested_action, self._latest_ir, blob=self._latest_blob
+        )
 
         left_speed = float(action[0] * self.config.max_wheel_speed)
         right_speed = float(action[1] * self.config.max_wheel_speed)
@@ -209,7 +213,11 @@ class RoboboCompactEnv(gym.Env):
 
         try:
             wheel_start = time.perf_counter()
-            if not self._is_simulation and hasattr(self.rob, "move_blocking"):
+            if (
+                not self._is_simulation
+                and self.config.hardware_blocking_commands
+                and hasattr(self.rob, "move_blocking")
+            ):
                 self.rob.move_blocking(
                     int(np.clip(round(left_speed), -100, 100)),
                     int(np.clip(round(right_speed), -100, 100)),
@@ -610,6 +618,7 @@ class RoboboCompactEnv(gym.Env):
             "blob": blob,
             "ir": irs,
         }
+        self._latest_blob = blob.copy()
 
         if self.config.return_image:
             if image_bgr is not None:

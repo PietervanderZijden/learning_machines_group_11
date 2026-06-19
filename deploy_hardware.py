@@ -19,6 +19,16 @@ RAISED_WHEEL_CONFIRMATION = "WHEELS RAISED"
 MAX_DEPLOY_WHEEL_SPEED = 70
 
 
+def sensor_acquisition_seconds(step_timing: dict, fallback: float) -> float:
+    """Return sensor acquisition latency, excluding commanded wheel duration."""
+    value = step_timing.get("observation", fallback)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+    return value if np.isfinite(value) and value >= 0.0 else float(fallback)
+
+
 def install_numpy_checkpoint_compat() -> None:
     """Allow NumPy 2.x checkpoints to load under ROS's NumPy 1.x runtime."""
     aliases = {
@@ -194,6 +204,14 @@ def main(rob=None, argv=None):
         help="Absolute motor speed cap; hardware deployment is capped at 70.",
     )
     parser.add_argument(
+        "--continuous-wheel-commands",
+        action="store_true",
+        help=(
+            "Use asynchronous hardware.py wheel commands and avoid waiting "
+            "for /robot/unlock/move; the 400 ms policy interval is retained."
+        ),
+    )
+    parser.add_argument(
         "--raised-wheel-test",
         action="store_true",
         help="Guarded policy rollout with every wheel physically clear.",
@@ -305,6 +323,7 @@ def main(rob=None, argv=None):
         calibration_profile=calibration,
         max_episode_seconds=run_seconds,
         max_wheel_speed=args.max_wheel_speed,
+        hardware_blocking_commands=not args.continuous_wheel_commands,
         randomize_food_positions=False,
     ))
     controls = OperatorControls()
@@ -325,6 +344,7 @@ def main(rob=None, argv=None):
     rewards = []
     dones = []
     inference_latencies = []
+    sensor_acquisition_latencies = []
     overruns = []
     safety_events = []
     collisions = []
@@ -379,9 +399,12 @@ def main(rob=None, argv=None):
                 except Exception as exc:
                     watchdog_failure = f"sensor_or_command_failure:{type(exc).__name__}"
                     break
-                observation_age = time.monotonic() - cycle_start
-                overrun = max(0.0, observation_age - CONTROL_INTERVAL_SECONDS)
-                if observation_age > args.stale_timeout:
+                cycle_duration = time.monotonic() - cycle_start
+                overrun = max(0.0, cycle_duration - CONTROL_INTERVAL_SECONDS)
+                sensor_latency = sensor_acquisition_seconds(
+                    env._last_step_timing, cycle_duration
+                )
+                if sensor_latency > args.stale_timeout:
                     watchdog_failure = "stale_observation"
                     break
 
@@ -394,6 +417,7 @@ def main(rob=None, argv=None):
                 rewards.append(float(reward))
                 dones.append(done)
                 inference_latencies.append(inference_latency)
+                sensor_acquisition_latencies.append(sensor_latency)
                 overruns.append(overrun)
                 safety_events.append(info.get("safety_override"))
                 collisions.append(bool(info["collision"]))
@@ -410,6 +434,8 @@ def main(rob=None, argv=None):
                     "requested_action": requested.tolist(),
                     "executed_action": executed.tolist(),
                     "inference_latency": inference_latency,
+                    "sensor_acquisition_latency": sensor_latency,
+                    "control_cycle_duration": cycle_duration,
                     "timing_overrun": overrun,
                     "safety_event": info.get("safety_override"),
                     "collision": bool(info["collision"]),
@@ -434,6 +460,9 @@ def main(rob=None, argv=None):
             rewards=np.asarray(rewards, dtype=np.float32),
             dones=np.asarray(dones, dtype=bool),
             inference_latencies=np.asarray(inference_latencies, dtype=np.float32),
+            sensor_acquisition_latencies=np.asarray(
+                sensor_acquisition_latencies, dtype=np.float32
+            ),
             timing_overruns=np.asarray(overruns, dtype=np.float32),
             safety_events=np.asarray(safety_events, dtype="U32"),
             collisions=np.asarray(collisions, dtype=bool),
@@ -442,12 +471,16 @@ def main(rob=None, argv=None):
             runtime_calibration=args.calibration,
             max_wheel_speed=args.max_wheel_speed,
             raised_wheel_test=args.raised_wheel_test,
+            continuous_wheel_commands=args.continuous_wheel_commands,
             watchdog_failure=watchdog_failure or "",
         )
 
     requested_array = np.asarray(requested_actions, dtype=np.float32)
     executed_array = np.asarray(executed_actions, dtype=np.float32)
     latency_array = np.asarray(inference_latencies, dtype=np.float32)
+    sensor_latency_array = np.asarray(
+        sensor_acquisition_latencies, dtype=np.float32
+    )
     overrun_array = np.asarray(overruns, dtype=np.float32)
     safety_counts = {
         str(event): safety_events.count(event)
@@ -460,6 +493,7 @@ def main(rob=None, argv=None):
         "runtime_calibration": args.calibration,
         "raised_wheel_test": args.raised_wheel_test,
         "max_wheel_speed": args.max_wheel_speed,
+        "continuous_wheel_commands": args.continuous_wheel_commands,
         "steps": len(rewards),
         "elapsed_seconds": float(len(rewards) * CONTROL_INTERVAL_SECONDS),
         "watchdog_failure": watchdog_failure or "",
@@ -479,6 +513,14 @@ def main(rob=None, argv=None):
         "p95_inference_latency": (
             float(np.quantile(latency_array, 0.95))
             if latency_array.size else 0.0
+        ),
+        "mean_sensor_acquisition_latency": (
+            float(np.mean(sensor_latency_array))
+            if sensor_latency_array.size else 0.0
+        ),
+        "max_sensor_acquisition_latency": (
+            float(np.max(sensor_latency_array))
+            if sensor_latency_array.size else 0.0
         ),
         "max_timing_overrun": (
             float(np.max(overrun_array)) if overrun_array.size else 0.0
