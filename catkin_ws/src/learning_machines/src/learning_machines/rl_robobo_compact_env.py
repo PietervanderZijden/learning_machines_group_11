@@ -31,6 +31,7 @@ class RoboboCompactEnvConfig:
     phone_tilt_speed: int = 100
     phone_tilt_tolerance: int = 5
     phone_tilt_timeout: float = 6.0
+    initialize_phone_tilt: bool = True
     max_episode_steps: int = 150
     collision_ir_threshold: float = 0.85
     collect_reward: float = 100.0
@@ -116,8 +117,8 @@ class RoboboCompactEnv(gym.Env):
         self._initial_pos_x = self._arena_cx
         self._initial_pos_y = self._arena_cy
         self._last_step_timing: dict[str, float] = {}
-        if not 26 <= self.config.phone_tilt <= 109:
-            raise ValueError("phone_tilt must be in the Robobo range [26, 109]")
+        if not 5 <= self.config.phone_tilt <= 110:
+            raise ValueError("phone_tilt must be in the Robobo range [5, 110]")
         if not 0 < self.config.phone_tilt_speed <= 100:
             raise ValueError("phone_tilt_speed must be in the range [1, 100]")
         profile = self.config.calibration_profile
@@ -385,7 +386,10 @@ class RoboboCompactEnv(gym.Env):
 
     def _initialize_camera_pose(self) -> None:
         """Point the camera at the arena before the first observation."""
-        if not (self.config.return_image or self.config.detect_blob_from_camera):
+        if (
+            not self.config.initialize_phone_tilt
+            or not (self.config.return_image or self.config.detect_blob_from_camera)
+        ):
             self._settle(self.config.reset_settle_time)
             return
 

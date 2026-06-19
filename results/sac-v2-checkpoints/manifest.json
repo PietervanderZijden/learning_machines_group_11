@@ -1,0 +1,35 @@
+{
+  "algorithm": "sac",
+  "algorithm_config": {
+    "action_change_penalty": 0.02,
+    "batch_size": 256,
+    "buffer_size": 1000000,
+    "collision_penalty": 0.0,
+    "curriculum": true,
+    "curriculum_one_food_steps": 100000,
+    "curriculum_three_food_steps": 250000,
+    "domain_randomization": true,
+    "emergency_override_penalty": 1.0,
+    "entropy_coefficient": 0.01,
+    "gamma": 0.9801,
+    "hardware_calibration": null,
+    "learning_rate": 0.0003,
+    "max_grad_norm": 10.0,
+    "observation_dim": 14,
+    "randomization_start_steps": 300000,
+    "reward_scale": 0.01,
+    "shaping_scale": 5.0,
+    "time_penalty_per_second": 0.5
+  },
+  "calibration_profile": "simulation",
+  "control_interval_seconds": 0.4,
+  "image_size": 64,
+  "observation_contract": "robobo-obs-v2",
+  "phone_tilt": 100,
+  "reward_contract": "robobo-reward-v4",
+  "smoothing": {
+    "max_delta": 0.5,
+    "previous_weight": 0.65,
+    "requested_weight": 0.35
+  }
+}

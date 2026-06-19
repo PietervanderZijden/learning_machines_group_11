@@ -42,16 +42,16 @@ def initialize_camera_down(
     timeout: float = 6.0,
 ) -> dict[str, int]:
     """Move the phone down without waiting indefinitely for an unlock callback."""
-    target = int(np.clip(target, 26, 109))
+    target = int(np.clip(target, 5, 110))
     before = int(robot.read_phone_tilt())
     blockid = robot.set_phone_tilt(target, int(np.clip(speed, 1, 100)))
     try:
         deadline = time.monotonic() + max(0.1, timeout)
         after = before
-        if 26 <= before <= 109:
+        if 5 <= before <= 110:
             while time.monotonic() < deadline:
                 after = int(robot.read_phone_tilt())
-                if 26 <= after <= 109 and abs(after - target) <= 5:
+                if 5 <= after <= 110 and abs(after - target) <= 5:
                     break
                 time.sleep(0.1)
             else:
@@ -415,8 +415,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Diagnostic only: bypass IR waiting for a guarded raised-wheel test.",
     )
-    parser.add_argument("--test-tilt", action="store_true")
-    parser.add_argument("--tilt-position", type=int, default=100)
+    parser.add_argument(
+        "--camera-tilt-on-start",
+        "--tilt-position",
+        dest="camera_tilt_on_start",
+        type=int,
+        default=None,
+        metavar="POSITION",
+        help="Optionally command physical camera tilt at startup (range 5-110).",
+    )
+    parser.add_argument(
+        "--test-tilt",
+        action="store_true",
+        help="Record the opt-in startup tilt result in the tilt_test report field.",
+    )
     parser.add_argument("--calibrate-ir", action="store_true")
     parser.add_argument("--calibration-seconds", type=float, default=8.0)
     parser.add_argument("--minimum-ir-span", type=float, default=5.0)
@@ -443,6 +455,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--wheel-speed must be between 1 and 20")
     if not 0.1 <= args.wheel_duration <= 0.5:
         raise SystemExit("--wheel-duration must be between 0.1 and 0.5 seconds")
+    if (
+        args.camera_tilt_on_start is not None
+        and not 5 <= args.camera_tilt_on_start <= 110
+    ):
+        raise SystemExit("--camera-tilt-on-start must be between 5 and 110")
+    if args.test_tilt and args.camera_tilt_on_start is None:
+        raise SystemExit("--test-tilt requires --camera-tilt-on-start POSITION")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = Path(args.output_dir or f"hardware_logs/diagnostics/{stamp}")
@@ -465,9 +484,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         camera_message = ros_result.pop("camera_message", None)
         report["ros"] = ros_result
-        report["camera_initialization"] = initialize_camera_down(
-            robot, args.tilt_position
-        )
+        if args.camera_tilt_on_start is not None:
+            report["camera_initialization"] = initialize_camera_down(
+                robot, args.camera_tilt_on_start
+            )
+        else:
+            report["camera_initialization"] = {
+                "commanded": False,
+                "note": "Camera pose left unchanged.",
+            }
 
         if args.skip_ir:
             report["ir"] = {

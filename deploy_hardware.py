@@ -158,6 +158,13 @@ def main(rob=None, argv=None):
     parser.add_argument("--calibration", required=True)
     parser.add_argument("--image-size", type=int, default=64)
     parser.add_argument("--phone-tilt", type=int, default=100)
+    parser.add_argument(
+        "--camera-tilt-on-start",
+        type=int,
+        default=None,
+        metavar="POSITION",
+        help="Optionally command physical camera tilt at startup (range 5-110).",
+    )
     parser.add_argument("--max-seconds", type=float, default=60.0)
     parser.add_argument("--stale-timeout", type=float, default=1.0)
     parser.add_argument(
@@ -185,6 +192,11 @@ def main(rob=None, argv=None):
         parser.error("--max-seconds must be positive")
     if args.stale_timeout <= 0:
         parser.error("--stale-timeout must be positive")
+    if (
+        args.camera_tilt_on_start is not None
+        and not 5 <= args.camera_tilt_on_start <= 110
+    ):
+        parser.error("--camera-tilt-on-start must be between 5 and 110")
     run_seconds = min(args.max_seconds, 10.0) if args.raised_wheel_test else args.max_seconds
     if args.raised_wheel_test:
         confirmation = args.wheel_confirmation
@@ -229,6 +241,17 @@ def main(rob=None, argv=None):
         f"runtime hardware calibration={calibration.name!r} "
         f"from {args.calibration}"
     )
+    if args.camera_tilt_on_start is None:
+        print("Camera startup tilt disabled; leaving the current phone pose unchanged.")
+    else:
+        print(
+            f"Camera will tilt to {args.camera_tilt_on_start} before inference."
+        )
+        if args.camera_tilt_on_start != manifest.phone_tilt:
+            print(
+                f"Warning: checkpoint was trained at tilt {manifest.phone_tilt}; "
+                f"runtime startup tilt is {args.camera_tilt_on_start}."
+            )
     if (
         args.algorithm == "sac"
         and manifest.algorithm_config.get("observation_dim") != 14
@@ -253,7 +276,12 @@ def main(rob=None, argv=None):
     env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
         return_image=True,
         image_obs_size=(args.image_size, args.image_size),
-        phone_tilt=args.phone_tilt,
+        phone_tilt=(
+            args.camera_tilt_on_start
+            if args.camera_tilt_on_start is not None
+            else manifest.phone_tilt
+        ),
+        initialize_phone_tilt=args.camera_tilt_on_start is not None,
         calibration_profile=calibration,
         max_episode_seconds=run_seconds,
         max_wheel_speed=args.max_wheel_speed,
@@ -286,8 +314,13 @@ def main(rob=None, argv=None):
     policy.reset()
 
     try:
+        initialization_items = (
+            "phone tilt, camera, and sensors"
+            if args.camera_tilt_on_start is not None
+            else "camera and sensors"
+        )
         print(
-            "Initializing phone tilt, camera, and sensors. "
+            f"Initializing {initialization_items}. "
             "Policy controls become active after this completes.",
             flush=True,
         )

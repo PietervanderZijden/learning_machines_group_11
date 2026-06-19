@@ -120,13 +120,23 @@ python validate_simulation.py --port 23000 --steps 2000 --task-events
 python evaluate_transfer.py \
   --algorithm sac \
   --checkpoint sac_models/sac_latest.zip \
-  --domain fixed
+  --domain fixed \
+  --wandb-project learning-machines-validation
 ```
 
 Run evaluation separately for `fixed`, `training`, `heldout`, and
 `calibration`. Results include completion rate, completion time, food/minute,
 collisions, safety overrides, action changes, and saturation, and can be sent
-to W&B with `--wandb-project`.
+to W&B with `--wandb-project`. DreamerV3 evaluation also writes one-step
+world-model diagnostics beside the requested CSV: `step_metrics.csv`,
+`report.json`, and labeled predicted-next/actual-next/error image strips.
+Control report image frequency with `--diagnostic-image-every` and
+`--max-diagnostic-images`. SAC evaluation uses the same diagnostics directory
+for per-step blob coordinates, area, visibility, IR/action/safety metrics, and
+camera frames annotated with the detected blob.
+When `--wandb-project` is supplied, every transition metric and diagnostic
+image is logged to W&B, episode and summary metrics use separate axes, and the
+local evaluation CSV/JSON/images are uploaded as an evaluation artifact.
 
 ## Hardware deployment
 
@@ -153,11 +163,26 @@ docker run --rm --entrypoint python3 learning_machines \
   -c 'import torch; print(torch.__version__)'
 ```
 
+For SAC simulation validation, transfer the checkpoint separately to:
+
+```text
+results/sac-v2-checkpoints/sac_best.zip
+```
+
+Its small `manifest.json` is tracked in that directory. The repository already
+contains the evaluator, simulator environment, calibration profile, W&B
+dependency, and CoppeliaSim scenes required by the SAC validation command.
+
 Before deploying a policy, run the read-only hardware diagnostics:
 
 ```bash
 ./run_hardware_validation.sh
 ```
+
+Camera movement is opt-in. Add `--camera-tilt-on-start POSITION` to validation
+or deployment commands to move the phone before capturing a frame or starting
+inference. Valid physical positions are `5` through `110`; omitting the option
+leaves the current camera pose unchanged.
 
 The launcher requires `ROS_MASTER_URI` and `ROS_IP` (or `ROS_HOSTNAME`) to be
 set by `scripts/setup.bash` or the container environment. It checks ROS
@@ -184,7 +209,9 @@ using the generated `hardware.json`.
 Phone tilt actuation is opt-in:
 
 ```bash
-./run_hardware_validation.sh --test-tilt --tilt-position 100
+./run_hardware_validation.sh \
+  --test-tilt \
+  --camera-tilt-on-start 100
 ```
 
 Only test motors with the robot physically raised and every wheel clear:

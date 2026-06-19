@@ -2,6 +2,7 @@ import numpy as np
 
 from learning_machines.calibrate_ir import robust_profile
 from validate_hardware import (
+    build_parser,
     calibration_quality,
     initialize_camera_down,
     run_wheel_test,
@@ -83,3 +84,13 @@ def test_camera_is_moved_down_without_blocking_on_unlock(monkeypatch):
     assert robot.commands == [(100, 10)]
     assert result == {"requested": 100, "before": 50, "after": 100}
     assert not robot._used_pids
+
+
+def test_camera_tilt_is_opt_in_and_accepts_110():
+    assert build_parser().parse_args([]).camera_tilt_on_start is None
+    assert (
+        build_parser()
+        .parse_args(["--camera-tilt-on-start", "110"])
+        .camera_tilt_on_start
+        == 110
+    )

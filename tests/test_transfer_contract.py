@@ -278,6 +278,21 @@ def test_reset_points_camera_down_before_first_observation():
     assert info["phone_tilt"] == 105
 
 
+def test_hardware_reset_leaves_camera_untouched_when_tilt_is_disabled():
+    rob = _FakeRobobo()
+    rob.tilt = 73
+    env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
+        phone_tilt=110,
+        initialize_phone_tilt=False,
+        reset_settle_time=0.0,
+        randomize_food_positions=False,
+    ))
+    _, info = env.reset()
+
+    assert rob.tilt == 73
+    assert info["phone_tilt"] == 73
+
+
 def test_hardware_reset_uses_bounded_async_camera_tilt_api():
     class AsyncTiltRobobo(_FakeRobobo):
         def __init__(self):
@@ -301,6 +316,16 @@ def test_hardware_reset_uses_bounded_async_camera_tilt_api():
 
     assert rob.async_tilts == [(100, 10)]
     assert not rob._used_pids
+
+
+def test_physical_camera_tilt_accepts_official_limits():
+    for tilt in (5, 110):
+        RoboboCompactEnv(rob=_FakeRobobo(), config=RoboboCompactEnvConfig(
+            phone_tilt=tilt,
+            initialize_phone_tilt=False,
+            detect_blob_from_camera=False,
+            randomize_food_positions=False,
+        ))
 
 
 def test_invalid_hardware_tilt_feedback_is_treated_as_unavailable():
