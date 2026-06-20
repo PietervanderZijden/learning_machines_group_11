@@ -201,3 +201,4 @@ CoppeliaSim.tar.xz
 # Scripts
 scripts/setup*
 scripts/start_coppelia_sim.*
+dreamerv3_reference/
