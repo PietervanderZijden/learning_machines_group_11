@@ -242,11 +242,46 @@ class HardwareRobobo(IRobobo):
         if blockid in self._used_pids:
             raise ValueError(f"BlockID {blockid} is already in use: {self._used_pids}")
         blockid = blockid if blockid is not None else self._first_unblocked()
-        self._used_pids.add(blockid)
-        self._move_srv(
-            Int8(left_speed), Int8(right_speed), Int32(millis), Int16(blockid)
+        last_error = None
+        for attempt in range(3):
+            self._used_pids.add(blockid)
+            try:
+                self._move_srv(
+                    Int8(left_speed),
+                    Int8(right_speed),
+                    Int32(millis),
+                    Int16(blockid),
+                )
+                return blockid
+            except rospy.ServiceException as exc:
+                last_error = exc
+                self._used_pids.discard(blockid)
+                if attempt < 2:
+                    try:
+                        rospy.wait_for_service(MOVE_WHEELS_SERVICE, timeout=0.5)
+                    except rospy.ROSException:
+                        pass
+                    self.sleep(0.05)
+        raise RuntimeError(
+            f"{MOVE_WHEELS_SERVICE} failed after 3 attempts: {last_error}"
+        ) from last_error
+
+    def set_wheel_speeds(
+        self, left_speed: float, right_speed: float, duration_s: float = 0.4
+    ) -> None:
+        """Continuously update wheel commands without an intermediate stop.
+
+        Hardware movement services cancel the previous command when a new one
+        arrives. A command duration longer than the control period therefore
+        holds motion across inference/sensor acquisition while the next command
+        replaces it seamlessly.
+        """
+        hold_millis = max(200, int(round(duration_s * 3000.0)))
+        self.move(
+            int(numpy.clip(round(left_speed), -100, 100)),
+            int(numpy.clip(round(right_speed), -100, 100)),
+            hold_millis,
         )
-        return blockid
 
     def reset_wheels(self) -> None:
         """Allows to reset the wheel encoder positions to 0.
