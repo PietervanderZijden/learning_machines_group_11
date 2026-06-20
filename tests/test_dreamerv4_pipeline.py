@@ -2,6 +2,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from learning_machines.dreamerv4.dreamerv4_image import ImageDreamerV4Agent
@@ -63,6 +64,47 @@ def test_dreamerv4_full_training_and_reload_pipeline():
             action = loaded.act(latents[:, 0], deterministic=True)
         assert action.shape == (batch, 2)
         assert torch.isfinite(action).all()
+
+
+def test_dreamerv4_dynamics_handles_right_padded_sequences():
+    agent = ImageDreamerV4Agent(
+        latent_dim=8,
+        d_model=16,
+        n_heads=4,
+        n_layers=1,
+        ff_dim=32,
+        context_length=4,
+        image_size=64,
+    ).cpu()
+    latents = torch.randn(2, 5, agent.state_dim)
+    actions = torch.randn(2, 4, 2).clamp(-1, 1)
+    rewards = torch.zeros(2, 4)
+    dones = torch.zeros(2, 4)
+    mask = torch.tensor([[1, 1, 1, 1], [1, 1, 0, 0]], dtype=torch.float32)
+
+    metrics = agent.update_dynamics(latents, actions, rewards, dones, mask)
+
+    assert all(np.isfinite(value) for value in metrics.values())
+
+
+def test_dreamerv4_dynamics_rejects_non_right_padded_masks():
+    agent = ImageDreamerV4Agent(
+        latent_dim=8,
+        d_model=16,
+        n_heads=4,
+        n_layers=1,
+        ff_dim=32,
+        context_length=4,
+        image_size=64,
+    ).cpu()
+    latents = torch.randn(1, 5, agent.state_dim)
+    actions = torch.zeros(1, 4, 2)
+    tau = torch.zeros(1, 4)
+    d = torch.full((1, 4), 0.25)
+    mask = torch.tensor([[1, 0, 1, 0]], dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="right padding"):
+        agent.dynamics(latents, actions, tau, d, mask)
 
 
 def test_recorded_episode_loader_skips_incompatible_legacy_files():

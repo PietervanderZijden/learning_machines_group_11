@@ -12,12 +12,24 @@ from learning_machines.distributional import (
 )
 from learning_machines.dreamerv3.dreamerv3 import (
     DreamerV3,
+    _cpu_byte_rng_states,
     select_imagination_starts,
 )
 from learning_machines.dreamerv4.actor_critic import (
     SquashedGaussianActor,
     compute_td_lambda_returns,
 )
+
+
+def test_cuda_rng_states_are_normalized_to_cpu_byte_tensors():
+    states = _cpu_byte_rng_states([
+        torch.tensor([1, 2, 3], dtype=torch.int64),
+        np.array([4, 5, 6], dtype=np.uint8),
+    ])
+
+    assert all(state.device.type == "cpu" for state in states)
+    assert all(state.dtype == torch.uint8 for state in states)
+    torch.testing.assert_close(states[0], torch.tensor([1, 2, 3], dtype=torch.uint8))
 
 
 def test_v3_lambda_return_bootstraps_terminal_value():
