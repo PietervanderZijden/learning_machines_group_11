@@ -1,3 +1,4 @@
+import math
 import os
 import signal
 import sys
@@ -6,6 +7,7 @@ from typing import Callable, List, NoReturn, Optional, TypeVar
 
 import cv2
 import numpy
+import zmq
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 from numpy.typing import NDArray
 from robobo_interface.base import IRobobo
@@ -72,10 +74,10 @@ class SimulationRobobo(IRobobo):
         if api_port is None:
             api_port = int(os.getenv("COPPELIA_SIM_PORT", "23000"))
 
-        # 0.0.0.0 to connect to the current computer on Linux, with `--net=host`
-        # This doesn't work on Windows or MacOS. There, the variable needs to be specified.
+        # 127.0.0.1 is the correct destination when CoppeliaSim runs locally.
+        # 0.0.0.0 is a server bind address and is not a portable client target.
         if ip_adress is None:
-            ip_adress = os.getenv("COPPELIA_SIM_IP", "0.0.0.0")
+            ip_adress = os.getenv("COPPELIA_SIM_IP", "127.0.0.1")
 
         # The RemoteAPIClient waits indefinetly, but I want some way to show an error.
         # It closes the connection when it gets garbage collected, so no need to close
@@ -85,13 +87,30 @@ class SimulationRobobo(IRobobo):
             )
         except TimeoutError:
             self._fail_connect(api_port, ip_adress)
+        self._client.socket.setsockopt(zmq.RCVTIMEO, int(timeout_dur * 1000))
+        self._client.socket.setsockopt(zmq.SNDTIMEO, int(timeout_dur * 1000))
 
         try:
             self._sim = timeout(lambda: self._client.require("sim"), timeout_dur)
         except TimeoutError:
             self._fail_connect(api_port, ip_adress)
 
+        # Transfer contract: one 400 ms simulation/policy step containing
+        # 5 ms internal dynamics substeps.
+        if self._sim.getSimulationState() != self._sim.simulation_stopped:
+            self.stop_simulation()
+        self.configure_simulation_timing()
+
+        # Opt 8: Disable rendering for maximum speed (only works with GUI)
+        try:
+            self._sim.setBoolParam(self._sim.boolparam_display_enabled, False)
+        except Exception:
+            pass  # Headless mode has no display to disable
+
         self._initialise_handles()
+        self._patch_food_contact_callback()
+        self._initialise_fast_handles()
+        self._stepping_enabled = True
         self._logger(f"""Connected to remote CoppeliaSim API server at port {api_port}
             Connected to robot: {self._identifier}""")
 
@@ -352,14 +371,37 @@ class SimulationRobobo(IRobobo):
         return WheelPosition(*ints)
 
     def sleep(self, seconds: float) -> None:
-        """Block for a an amount of seconds.
-        How to do this depends on the kind of robot, and so is to be found here.
-        """
-        start_time = self.get_sim_time()
-        while self.get_sim_time() - start_time < seconds:
-            if not self.is_running():
-                raise RuntimeError("Cannot sleep when simulation is not running")
-            time.sleep(0.02)
+        """Block for an amount of time using simulation stepping if enabled,
+        otherwise fall back to wall-clock sleep."""
+        if not self.is_running():
+            raise RuntimeError("Cannot sleep when simulation is not running")
+        if self._stepping_enabled:
+            dt = self._sim.getSimulationTimeStep()
+            ratio = seconds / dt
+            nearest = round(ratio)
+            steps = max(
+                1,
+                int(nearest if math.isclose(ratio, nearest, abs_tol=1e-9) else math.ceil(ratio)),
+            )
+            for _ in range(steps):
+                if not self.is_running():
+                    return
+                try:
+                    self._client.step()
+                except zmq.ZMQError as exc:
+                    raise RuntimeError(
+                        "CoppeliaSim stepping timed out or lost its ZMQ connection"
+                    ) from exc
+                except Exception:
+                    if not self.is_running():
+                        return
+                    raise
+        else:
+            start_time = self.get_sim_time()
+            while self.get_sim_time() - start_time < seconds:
+                if not self.is_running():
+                    return
+                time.sleep(0.002)
 
     def is_blocked(self, blockid: int) -> bool:
         """See if the robot is currently "blocked", which is to say, performing an action
@@ -380,25 +422,37 @@ class SimulationRobobo(IRobobo):
     def block(self):
         """Block untill (only return once) all blocking actions are completed"""
         while any(self.is_blocked(blockid) for blockid in self._used_pids):
-            time.sleep(0.02)
+            self.sleep(0.002)
 
     def play_simulation(self):
         """Start the simulation"""
         self._sim.startSimulation()
-        while not self.is_running():
+        for _ in range(100):
+            if self.is_running():
+                return
             time.sleep(0.002)
+        if not self.is_running():
+            raise RuntimeError("Simulation failed to start")
 
     def pause_simulation(self):
         """Pause the simulation"""
         self._sim.pauseSimulation()
-        while not self.is_paused():
+        for _ in range(100):
+            if self.is_paused():
+                return
             time.sleep(0.002)
+        if not self.is_paused():
+            raise RuntimeError("Simulation failed to pause")
 
     def stop_simulation(self):
         """Stop the simulation"""
         self._sim.stopSimulation()
-        while not self.is_stopped():
+        for _ in range(100):
+            if self.is_stopped():
+                return
             time.sleep(0.002)
+        if not self.is_stopped():
+            raise RuntimeError("Simulation failed to stop")
 
     def is_stopped(self) -> bool:
         """Return wether the simulation is stopped"""
@@ -561,6 +615,185 @@ class SimulationRobobo(IRobobo):
         if ret < 0:
             raise AttributeError(f"Could not find Script of {name} in scene")
         return ret
+
+    def _initialise_fast_handles(self) -> None:
+        """Cache joint object handles for direct velocity control (RL fast path)."""
+        self._left_motor_joint = self._get_object(f"/Robobo{self._identifier}/Left_Motor")
+        self._right_motor_joint = self._get_object(f"/Robobo{self._identifier}/Right_Motor")
+
+    def configure_simulation_timing(self) -> None:
+        """Restore 400 ms control steps with 5 ms internal dynamics.
+
+        CoppeliaSim distinguishes its simulation step from the physics-engine
+        step. Keeping the simulation step at the policy interval lets a single
+        synchronous remote step advance one transition, while the dynamics
+        engine still integrates that transition in 80 substeps.
+        """
+        if self._sim.getSimulationState() != self._sim.simulation_stopped:
+            raise RuntimeError("simulation timing can only be configured while stopped")
+        self._sim.setFloatParam(self._sim.floatparam_simulation_time_step, 0.4)
+        self._sim.setFloatParam(self._sim.floatparam_physicstimestep, 0.005)
+        simulation_dt = float(self._sim.getSimulationTimeStep())
+        dynamics_dt = float(
+            self._sim.getFloatParam(self._sim.floatparam_physicstimestep)
+        )
+        if not math.isclose(simulation_dt, 0.4, rel_tol=0.0, abs_tol=1e-6):
+            raise RuntimeError(
+                f"CoppeliaSim simulation timestep must be 0.400 s, "
+                f"got {simulation_dt:.6f} s"
+            )
+        if not math.isclose(dynamics_dt, 0.005, rel_tol=0.0, abs_tol=1e-6):
+            raise RuntimeError(
+                f"CoppeliaSim dynamics timestep must be 0.005 s, "
+                f"got {dynamics_dt:.6f} s"
+            )
+        self._client.setStepping(True)
+
+    def _patch_food_contact_callback(self) -> None:
+        """Make food collection independent of contact handle ordering.
+
+        The supplied scene only checked ``handle1`` and commented out the
+        equivalent ``handle2`` branch. CoppeliaSim does not guarantee which
+        colliding object is first, so valid robot-food contacts could be lost.
+        """
+        if self._food_script is None or not self.is_stopped():
+            return
+        try:
+            text = self._sim.getScriptStringParam(
+                self._food_script, self._sim.scriptstringparam_text
+            )
+            robot_handles = set()
+            for handle in self._sim.getObjectsInTree(
+                self._robobo,
+                self._sim.object_shape_type,
+                0,
+            ):
+                try:
+                    respondable = self._sim.getObjectInt32Param(
+                        handle,
+                        self._sim.shapeintparam_respondable,
+                    )
+                except Exception:
+                    respondable = 0
+                if respondable:
+                    robot_handles.add(handle)
+            if not robot_handles:
+                raise RuntimeError(
+                    "Robobo model has no respondable shapes for food contact"
+                )
+            handle_entries = ", ".join(
+                f"[{handle}] = true" for handle in sorted(robot_handles)
+            )
+            helper = (
+                f"local robobo_contact_handles = {{{handle_entries}}}\n\n"
+                "local function belongs_to_robobo(handle)\n"
+                "    return robobo_contact_handles[handle] == true\n"
+                "end\n\n"
+            )
+            helper_start = text.find("local function belongs_to_robobo(handle)")
+            if helper_start >= 0:
+                table_start = text.rfind(
+                    "local robobo_contact_handles", 0, helper_start
+                )
+                helper_end = text.find("\nend\n", helper_start)
+                if helper_end >= 0:
+                    removal_start = (
+                        table_start if table_start >= 0 else helper_start
+                    )
+                    text = (
+                        text[:removal_start]
+                        + text[helper_end + len("\nend\n"):]
+                    )
+            import_line = 'local sim = require("sim")\n'
+            if import_line not in text:
+                raise RuntimeError("Food script does not import the CoppeliaSim API")
+            text = text.replace(import_line, import_line + "\n" + helper, 1)
+            old = """    --if h2:startswith("Food") then
+    --    print( h1 .. " <- " .. h2)
+    --end"""
+            text = text.replace(
+                "    --h2 = sim.getObjectName(inData.handle2)",
+                "    h2 = sim.getObjectName(inData.handle2)",
+            )
+            if old in text:
+                text = text.replace(
+                    old,
+                    """    if h2:startswith("Food") and belongs_to_robobo(inData.handle1) then
+        collect_food(inData.handle2)
+    end""",
+                )
+            text = text.replace(
+                """    if h1:startswith("Food") then""",
+                """    if h1:startswith("Food") and belongs_to_robobo(inData.handle2) then""",
+            ).replace(
+                """    if h1:startswith("Food") then
+        collect_food(inData.handle1)
+    end""",
+                """    if h1:startswith("Food") and belongs_to_robobo(inData.handle2) then
+        collect_food(inData.handle1)
+    end""",
+            ).replace(
+                """    if h2:startswith("Food") then
+        collect_food(inData.handle2)
+    end""",
+                """    if h2:startswith("Food") and belongs_to_robobo(inData.handle1) then
+        collect_food(inData.handle2)
+    end""",
+            )
+            self._sim.setScriptText(self._food_script, text)
+            self._logger(
+                "Patched Food contact callback to require Robobo-food contact"
+            )
+        except Exception as exc:
+            self._logger(f"Warning: could not patch Food contact callback: {exc}")
+
+    def _robobo_speed_to_rad_s(self, speed: float, duration_s: float) -> float:
+        """Convert Robobo -100..100 speed to rad/s for sim.setJointTargetVelocity().
+
+        Uses the cubic polynomial from the upstream Robobo Gazebo plugin
+        (move_wheels.cpp), which models the motor's actual velocity profile.
+        """
+        if speed == 0.0:
+            return 0.0
+
+        sign = 1.0 if speed > 0.0 else -1.0
+        v = abs(speed)
+
+        term1 = (
+            1.646e-06 * v**3
+            + -2.850e-03 * v**2
+            + 6.649 * v
+            + 5.114e01
+        )
+        term2 = (
+            -2.912e-04 * v**3
+            + 4.647e-02 * v**2
+            + -1.339 * v
+            + -1.225e01
+        )
+
+        velocity_deg_s = term1 + term2 / duration_s
+        velocity_rad_s = velocity_deg_s * math.pi / 180.0
+
+        return sign * velocity_rad_s
+
+    def set_wheel_speeds(self, left_speed: float, right_speed: float, duration_s: float = 0.4) -> None:
+        """Set wheel velocities, converting Robobo -100..100 units to rad/s.
+
+        Args:
+            left_speed: Left wheel speed in Robobo units (-100 to 100).
+            right_speed: Right wheel speed in Robobo units (-100 to 100).
+            duration_s: Action duration in seconds (default 0.4 for 400ms steps).
+        """
+        left_vel = self._robobo_speed_to_rad_s(left_speed, duration_s)
+        right_vel = self._robobo_speed_to_rad_s(right_speed, duration_s)
+        self._sim.setJointTargetVelocity(self._left_motor_joint, left_vel)
+        self._sim.setJointTargetVelocity(self._right_motor_joint, right_vel)
+
+    def step_simulation(self, steps: int = 1) -> None:
+        """Advance simulation by exactly N timesteps. No polling, no sleep."""
+        for _ in range(steps):
+            self._client.step()
 
     def _fail_connect(self, api_port: int, ip_adress: str) -> NoReturn:
         self._logger("""CoppeliaSim Api Connection Error

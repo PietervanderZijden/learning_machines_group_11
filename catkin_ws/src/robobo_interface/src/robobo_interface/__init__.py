@@ -10,8 +10,15 @@ from .datatypes import (
     WheelPosition,
 )
 from .base import IRobobo
-from .hardware import HardwareRobobo
 from .simulation import SimulationRobobo
+
+
+def __getattr__(name: str):
+    if name == "HardwareRobobo":
+        from .hardware import HardwareRobobo
+        return HardwareRobobo
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = (
     "IRobobo",
