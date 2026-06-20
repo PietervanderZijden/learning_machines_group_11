@@ -353,11 +353,15 @@ class ImageDynamicsModel(nn.Module):
         causal_mask = self._ensure_mask_size(tokens.shape[1], tokens.device)
 
         if mask is not None:
-            key_padding_mask = ~mask.bool().repeat_interleave(self.tokens_per_step, dim=1)
-        else:
-            key_padding_mask = None
+            valid = mask.bool()
+            if ((~valid[:, :-1]) & valid[:, 1:]).any():
+                raise ValueError("DreamerV4 dynamics mask must use right padding")
 
-        hidden = self.transformer(tokens, mask=causal_mask, src_key_padding_mask=key_padding_mask)
+        # Batches are right-padded, so causal attention already prevents every
+        # valid query from seeing padded future tokens. Omitting the additional
+        # key-padding mask also avoids non-finite fused-attention gradients seen
+        # on ROCm for padded query rows.
+        hidden = self.transformer(tokens, mask=causal_mask)
 
         # X-prediction: predict clean latent z₁ from positions 0..T-1
         register_hidden = hidden[:, self.register_index::self.tokens_per_step][:, :T]
@@ -746,9 +750,12 @@ class ImageDreamerV4Agent(nn.Module):
         # This requires separate forward passes for the two half-steps
         bootstrap_loss = torch.zeros_like(flow_loss)
 
-        if is_bootstrap.any():
-            # Get indices of bootstrap samples
-            bootstrap_idx = is_bootstrap.nonzero(as_tuple=True)
+        active_bootstrap = is_bootstrap & mask.bool()
+        if active_bootstrap.any():
+            # Padded transitions must not enter the teacher passes. Some fused
+            # attention backends can produce non-finite gradients for masked
+            # query rows even when their final loss weight is zero.
+            bootstrap_idx = active_bootstrap.nonzero(as_tuple=True)
             if len(bootstrap_idx[0]) > 0:
                 # Get tau and d for bootstrap samples
                 tau_b = tau[bootstrap_idx]  # (N,)
@@ -762,50 +769,51 @@ class ImageDreamerV4Agent(nn.Module):
                 all_context = preds["context_tokens"][batch_idx]
                 context_tokens = all_context[:, :max_context_len] if max_context_len > 0 else all_context[:, :0]
 
-                # First half-step: predict clean from z̃ at (τ, d/2)
-                d_half = d_b / 2
-                tau_mid = tau_b + d_half
-
-                # Predict clean latent at first half-step
-                # f(z̃, τ, d/2) predicts clean z₁ given corrupted z̃ at signal level τ with step d/2
-                z1_pred_first = self.dynamics.predict_single_step(
-                    z_tilde_b,
-                    actions_b,
-                    tau_b,
-                    d_half,
-                    context_tokens=context_tokens,
-                    context_lengths=context_lengths,
-                )  # (N, latent_dim)
-
-                # Compute velocity: b' = (ẑ₁ - z̃) / (1-τ)
-                b_prime = (z1_pred_first - z_tilde_b) / (1 - tau_b + 1e-6).unsqueeze(-1)
-
-                # Intermediate point: z' = z̃ + b' * d/2
-                z_prime = z_tilde_b + b_prime * d_half.unsqueeze(-1)
-
-                # Second half-step: predict clean from z' at (τ+d/2, d/2)
-                # f(z', τ+d/2, d/2) predicts clean z₁ given z' at signal level τ+d/2 with step d/2
-                z1_pred_second = self.dynamics.predict_single_step(
-                    z_prime,
-                    actions_b,
-                    tau_mid,
-                    d_half,
-                    context_tokens=context_tokens,
-                    context_lengths=context_lengths,
-                )  # (N, latent_dim)
-
-                # Compute velocity: b'' = (ẑ₁ - z') / (1-(τ+d/2))
-                b_double_prime = (z1_pred_second - z_prime) / (1 - tau_mid + 1e-6).unsqueeze(-1)
-
-                # Bootstrap target: sg((b' + b'') / 2)
-                # This is the self-consistency target: one big step = average of two small steps
-                v_target = (b_prime + b_double_prime) / 2
-
-                # Convert to x-space: target = z̃ + v_target * (1-τ)
-                z1_bootstrap_target = z_tilde_b + v_target * (1 - tau_b).unsqueeze(-1)
+                # The two half-step predictions form a stop-gradient teacher
+                # target. Building their autograd graphs wastes memory and can
+                # propagate backend attention NaNs before the final detach.
+                with torch.no_grad():
+                    d_half = d_b / 2
+                    tau_mid = tau_b + d_half
+                    z1_pred_first = self.dynamics.predict_single_step(
+                        z_tilde_b,
+                        actions_b,
+                        tau_b,
+                        d_half,
+                        context_tokens=context_tokens,
+                        context_lengths=context_lengths,
+                    )
+                    b_prime = (z1_pred_first - z_tilde_b) / (
+                        1 - tau_b + 1e-6
+                    ).unsqueeze(-1)
+                    z_prime = z_tilde_b + b_prime * d_half.unsqueeze(-1)
+                    z1_pred_second = self.dynamics.predict_single_step(
+                        z_prime,
+                        actions_b,
+                        tau_mid,
+                        d_half,
+                        context_tokens=context_tokens,
+                        context_lengths=context_lengths,
+                    )
+                    b_double_prime = (z1_pred_second - z_prime) / (
+                        1 - tau_mid + 1e-6
+                    ).unsqueeze(-1)
+                    v_target = (b_prime + b_double_prime) / 2
+                    z1_bootstrap_target = (
+                        z_tilde_b
+                        + v_target * (1 - tau_b).unsqueeze(-1)
+                    )
+                    if not torch.isfinite(z1_bootstrap_target).all():
+                        raise FloatingPointError(
+                            "non-finite DreamerV4 bootstrap target"
+                        )
 
                 # Bootstrap loss: ||ẑ₁ - target||²
-                bootstrap_loss_sample = F.mse_loss(z1_pred[bootstrap_idx], z1_bootstrap_target.detach(), reduction="none")
+                bootstrap_loss_sample = F.mse_loss(
+                    z1_pred[bootstrap_idx],
+                    z1_bootstrap_target,
+                    reduction="none",
+                )
                 bootstrap_loss_sample = bootstrap_loss_sample.mean(-1)  # (N,)
 
                 bootstrap_loss[bootstrap_idx] = bootstrap_loss_sample
@@ -1195,5 +1203,10 @@ class ImageDreamerV4Agent(nn.Module):
         if "torch_rng_state" in checkpoint:
             torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
         if torch.cuda.is_available() and checkpoint.get("cuda_rng_state") is not None:
-            torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+            torch.cuda.set_rng_state_all([
+                state.detach().to(device="cpu", dtype=torch.uint8)
+                if isinstance(state, torch.Tensor)
+                else torch.as_tensor(state, dtype=torch.uint8, device="cpu")
+                for state in checkpoint["cuda_rng_state"]
+            ])
         return agent
