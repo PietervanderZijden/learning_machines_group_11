@@ -36,6 +36,7 @@ deploy_logs/
 # Ignore generated docs
 *.dox
 *.wikidoc
+docs/
 
 # eclipse stuff
 .project

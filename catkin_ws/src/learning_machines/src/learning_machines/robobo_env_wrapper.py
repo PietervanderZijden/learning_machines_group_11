@@ -72,7 +72,7 @@ class RoboboNM512Wrapper(gym.Env):
         obs, info = self._env.reset(seed=seed, options=options)
         self._is_first = True
         self._episode_step = 0
-        return self._convert_obs(obs), info
+        return self._convert_obs(obs)
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self._env.step(action)
