@@ -286,6 +286,25 @@ def main():
     parser.add_argument("--replay-value-weight", type=float, default=0.3)
     parser.add_argument("--buffer-capacity", type=int, default=100_000)
     parser.add_argument("--checkpoint-every", type=int, default=10000)
+    parser.add_argument(
+        "--time-penalty-per-second",
+        type=float,
+        default=0.5,
+        help="Elapsed-time penalty; set to 0.0 for sparse rewards.",
+    )
+    parser.add_argument(
+        "--action-change-penalty",
+        type=float,
+        default=0.02,
+        help="Penalty for large action changes; set to 0.0 for sparse rewards.",
+    )
+    parser.add_argument(
+        "--checkpoint-history",
+        type=int,
+        default=5,
+        help="Number of step-numbered checkpoints (dreamerv3_step_<step>.pt) to retain. "
+             "0 disables step-numbered checkpoints.",
+    )
     parser.add_argument("--log-interval", type=int, default=2048)
     parser.add_argument("--record-dir", type=str, default="recorded_episodes",
                         help="Directory to save image episodes for offline training")
@@ -299,6 +318,12 @@ def main():
         "--curriculum",
         action=argparse.BooleanOptionalAction,
         default=True,
+    )
+    parser.add_argument(
+        "--domain-randomization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable domain randomization wrapper. Use --no-domain-randomization to disable.",
     )
     parser.add_argument("--curriculum-one-food-steps", type=int, default=100_000)
     parser.add_argument("--curriculum-three-food-steps", type=int, default=250_000)
@@ -418,6 +443,8 @@ def main():
         image_obs_size=(args.image_size, args.image_size),
         calibration_path=args.calibration,
         active_food_count=1 if args.curriculum else None,
+        time_penalty_per_second=args.time_penalty_per_second,
+        action_change_penalty=args.action_change_penalty,
     )
     rob_env = RoboboCompactEnv(config=env_config)
     randomization_ranges = None
@@ -432,13 +459,13 @@ def main():
             }, allow_val_change=True)
     env = DomainRandomizationWrapper(
         rob_env,
-        enabled=not args.curriculum,
+        enabled=(args.domain_randomization and not args.curriculum),
         ranges=randomization_ranges,
     )
 
     def apply_curriculum(step: int) -> tuple[int, bool]:
         if not args.curriculum:
-            return 7, True
+            return 7, args.domain_randomization
         if step < args.curriculum_one_food_steps:
             active_food = 1
         elif step < args.curriculum_three_food_steps:
@@ -446,8 +473,11 @@ def main():
         else:
             active_food = 7
         env_config.active_food_count = active_food
-        randomization_enabled = step >= args.randomization_start_steps
-        env.enabled = randomization_enabled
+        randomization_enabled = (
+            args.domain_randomization and step >= args.randomization_start_steps
+        )
+        if env.enabled is not None:
+            env.enabled = randomization_enabled
         return active_food, randomization_enabled
 
     apply_curriculum(agent.global_step)
@@ -554,6 +584,7 @@ def main():
             obs = next_obs
             ir_obs = next_ir
             steps_prefilled += 1
+            agent.global_step += 1
 
             if done:
                 obs_dict, info = env.reset()
@@ -629,8 +660,8 @@ def main():
             # Record image before action
             if not args.no_record and "image" in obs_dict:
                 episode_images.append(obs_dict["image"].copy())
-                if ir_obs is not None:
-                    episode_irs.append(ir_obs.copy())
+                if "ir" in obs_dict:
+                    episode_irs.append(obs_dict["ir"].astype(np.float32).copy())
 
             obs_dict, reward, terminated, truncated, info = env.step(action)
             executed_action = np.asarray(info.get("executed_action", action), dtype=np.float32)
@@ -760,7 +791,7 @@ def main():
                 # Save episode with images
                 if not args.no_record and "image" in obs_dict:
                     episode_images.append(obs_dict["image"].copy())
-                    if cfg.use_multimodal and "ir" in obs_dict:
+                    if "ir" in obs_dict:
                         episode_irs.append(obs_dict["ir"].astype(np.float32).copy())
                 if not args.no_record and len(episode_images) > 1:
                     ep_data = {
@@ -876,6 +907,15 @@ def main():
             if agent.global_step % args.checkpoint_every == 0:
                 checkpoint_dir.mkdir(parents=True, exist_ok=True)
                 agent.save(model_path)
+                if args.checkpoint_history > 0:
+                    step_path = checkpoint_dir / f"dreamerv3_step_{agent.global_step}.pt"
+                    agent.save(step_path)
+                    step_checkpoints = sorted(
+                        checkpoint_dir.glob("dreamerv3_step_*.pt"),
+                        key=lambda p: int(p.stem.split("_")[-1]),
+                    )
+                    for old_path in step_checkpoints[:-args.checkpoint_history]:
+                        old_path.unlink()
 
     except KeyboardInterrupt:
         print("\nInterrupted — saving...")

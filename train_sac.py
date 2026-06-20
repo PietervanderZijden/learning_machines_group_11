@@ -27,6 +27,14 @@ import numpy as np
 from gymnasium import spaces
 
 
+def _save_episode_atomic(path: Path, data: dict[str, np.ndarray]) -> None:
+    """Write a complete episode without exposing a partial NPZ file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp.npz")
+    np.savez_compressed(temporary, **data)
+    temporary.replace(path)
+
+
 def _checkpoint_timesteps(path: Path) -> int:
     """Read SB3's persisted timestep counter without loading the model."""
     try:
@@ -113,6 +121,9 @@ class RoboboSACEnv(gym.Env):
         curriculum_one_food_steps=100_000,
         curriculum_three_food_steps=250_000,
         randomization_start_steps=300_000,
+        image_size=64,
+        record_dir="recorded_episodes",
+        no_record=False,
     ):
         super().__init__()
         from learning_machines.rl_robobo_compact_env import (
@@ -128,6 +139,8 @@ class RoboboSACEnv(gym.Env):
             action_change_penalty=action_change_penalty,
             calibration_path=calibration_path,
             active_food_count=1 if curriculum else None,
+            return_image=not no_record,
+            image_obs_size=(image_size, image_size),
         )
         inner = RoboboCompactEnv(rob=rob, config=self._config)
         self._domain_wrapper = None
@@ -154,6 +167,22 @@ class RoboboSACEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(2,), dtype=np.float32,
         )
+
+        self._record = not no_record
+        self._record_dir = Path(record_dir) if record_dir else None
+        self._episode_count = 0
+        if self._record and self._record_dir is not None:
+            existing = sorted(
+                self._record_dir.glob("episodes/ep_*.npz"),
+                key=lambda p: int(p.stem.split("_")[-1]),
+            )
+            if existing:
+                self._episode_count = int(existing[-1].stem.split("_")[-1]) + 1
+        self._episode_images: list[np.ndarray] = []
+        self._episode_actions: list[np.ndarray] = []
+        self._episode_rewards: list[float] = []
+        self._episode_dones: list[bool] = []
+        self._episode_irs: list[np.ndarray] = []
 
     def _flatten_obs(self, obs_dict):
         blob = obs_dict["blob"]
@@ -183,20 +212,52 @@ class RoboboSACEnv(gym.Env):
     def _get_food_count(self, info):
         return float(info.get("food_collected", 0))
 
+    def _save_episode(self):
+        if not self._record or self._record_dir is None or len(self._episode_images) < 2:
+            return
+        ep_data = {
+            "images": np.array(self._episode_images, dtype=np.uint8),
+            "actions": np.array(self._episode_actions, dtype=np.float32),
+            "rewards": np.array(self._episode_rewards, dtype=np.float32),
+            "dones": np.array(self._episode_dones, dtype=bool),
+            "observation_contract": np.array("robobo-obs-v2"),
+            "reward_contract": np.array("robobo-reward-v4"),
+            "control_interval_seconds": np.array(0.4),
+            "calibration_profile": np.array(
+                self._inner.observation_adapter.profile.name
+            ),
+            "phone_tilt": np.array(self._inner.config.phone_tilt),
+        }
+        if self._episode_irs:
+            ep_data["irs"] = np.array(self._episode_irs, dtype=np.float32)
+        ep_path = self._record_dir / "episodes" / f"ep_{self._episode_count:06d}.npz"
+        _save_episode_atomic(ep_path, ep_data)
+        self._episode_count += 1
+
     def reset(self, *, seed=None, options=None):
         obs_dict, info = self._inner.reset(seed=seed, options=options)
         from learning_machines.transfer import blob_progress_potential
         self._previous_executed_action.fill(0.0)
         self._previous_blob_switches = int(info.get("blob_target_switches", 0))
         self._previous_potential = blob_progress_potential(obs_dict["blob"])
+        if self._record:
+            self._episode_images = []
+            self._episode_actions = []
+            self._episode_rewards = []
+            self._episode_dones = []
+            self._episode_irs = []
+            if "image" in obs_dict:
+                self._episode_images.append(obs_dict["image"].copy())
+                self._episode_irs.append(obs_dict["ir"].astype(np.float32).copy())
         return self._flatten_obs(obs_dict), info
 
     def step(self, action):
         from learning_machines.transfer import blob_progress_potential
         obs_dict, raw_reward, terminated, truncated, info = self._inner.step(action)
-        self._previous_executed_action = np.asarray(
+        executed_action = np.asarray(
             info.get("executed_action", action), dtype=np.float32
         ).copy()
+        self._previous_executed_action = executed_action
         food = self._get_food_count(info)
         obs = self._flatten_obs(obs_dict)
         info = dict(info)
@@ -230,6 +291,15 @@ class RoboboSACEnv(gym.Env):
             float(raw_reward) + shaping_reward - emergency_cost
         )
         training_reward = self.reward_scale * unscaled_training_reward
+        if self._record:
+            self._episode_actions.append(executed_action)
+            self._episode_rewards.append(float(raw_reward))
+            self._episode_dones.append(bool(terminated or truncated))
+            if "image" in obs_dict:
+                self._episode_images.append(obs_dict["image"].copy())
+                self._episode_irs.append(obs_dict["ir"].astype(np.float32).copy())
+            if terminated or truncated:
+                self._save_episode()
         info["shaping_reward"] = shaping_reward
         info["safety_override_penalty"] = emergency_cost
         info["unscaled_training_reward"] = unscaled_training_reward
@@ -251,6 +321,12 @@ def main():
         default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
     )
     parser.add_argument("--max-episode-steps", type=int, default=150)
+    parser.add_argument("--image-size", type=int, default=64,
+                        help="Image size for recorded episodes (default: 64x64)")
+    parser.add_argument("--record-dir", type=str, default="recorded_episodes",
+                        help="Directory to save image episodes for offline training")
+    parser.add_argument("--no-record", action="store_true",
+                        help="Disable episode recording")
     parser.add_argument("--checkpoint-dir", type=str, default="sac_models")
     parser.add_argument("--learning-starts", type=int, default=2000)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -528,6 +604,9 @@ def main():
             curriculum_one_food_steps=args.curriculum_one_food_steps,
             curriculum_three_food_steps=args.curriculum_three_food_steps,
             randomization_start_steps=args.randomization_start_steps,
+            image_size=args.image_size,
+            record_dir=args.record_dir,
+            no_record=args.no_record,
         ),
         filename=str(log_dir / "monitor.csv"),
         info_keywords=(
