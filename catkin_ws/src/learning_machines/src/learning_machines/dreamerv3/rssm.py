@@ -31,6 +31,7 @@ class RSSM(nn.Module):
         stochastic_bins: int = 32,
         hidden_size: int = 512,
         unimix: float = 0.01,
+        obs_is_embedding: bool = False,
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -40,6 +41,7 @@ class RSSM(nn.Module):
         self.stochastic_bins = stochastic_bins
         self.stochastic_size = stochastic_classes * stochastic_bins
         self.unimix = unimix
+        self.obs_is_embedding = obs_is_embedding
 
         # Embed observation and action into hidden_size
         self.obs_embed = nn.Linear(obs_dim, hidden_size)
@@ -64,8 +66,9 @@ class RSSM(nn.Module):
             nn.Linear(hidden_size, stochastic_classes * stochastic_bins),
         )
 
-        # Layer norm for stability
-        self.obs_norm = nn.LayerNorm(obs_dim)
+        # Layer norm for stability (only used for raw vector obs)
+        if not obs_is_embedding:
+            self.obs_norm = nn.LayerNorm(obs_dim)
 
     def initial_state(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         h = torch.zeros(batch_size, self.deterministic_size, device=device)
@@ -78,12 +81,18 @@ class RSSM(nn.Module):
         """Forward pass for observed data.
 
         Paper: h_t = GRU(h_{t-1}, [z_{t-1}, a_{t-1}])
-        Observations are symlog-transformed before encoding.
+        When obs_is_embedding=True, obs is already a learned embedding (from CNN/MLP encoder)
+        and should NOT be symlog-transformed. Symlog is only for raw vector observations.
         Returns: (h_new, z_posterior, prior_logits, posterior_logits)
         """
-        obs_symlog = torch.sign(obs) * torch.log1p(torch.abs(obs))
-        obs_normed = self.obs_norm(obs_symlog)
-        obs_embed = F.silu(self.obs_embed(obs_normed))
+        if self.obs_is_embedding:
+            # obs is already a learned embedding — skip symlog and LayerNorm
+            obs_embed = F.silu(self.obs_embed(obs))
+        else:
+            # Raw vector observation — apply symlog then embed
+            obs_symlog = torch.sign(obs) * torch.log1p(torch.abs(obs))
+            obs_normed = self.obs_norm(obs_symlog)
+            obs_embed = F.silu(self.obs_embed(obs_normed))
         act_embed = F.silu(self.act_embed(action))
         z_embed = F.silu(self.z_embed(z))
 

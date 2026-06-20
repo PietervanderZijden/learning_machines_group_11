@@ -38,6 +38,16 @@ from .rssm import RSSM
 from .world_model import WorldModel
 
 
+def _cpu_byte_rng_states(states) -> list[torch.Tensor]:
+    """Normalize saved CUDA RNG states for torch.cuda.set_rng_state_all."""
+    return [
+        state.detach().to(device="cpu", dtype=torch.uint8)
+        if isinstance(state, torch.Tensor)
+        else torch.as_tensor(state, dtype=torch.uint8, device="cpu")
+        for state in states
+    ]
+
+
 def green_saliency_loss(
     prediction: torch.Tensor, target: torch.Tensor
 ) -> torch.Tensor:
@@ -651,7 +661,9 @@ class DreamerV3:
         if "torch_rng_state" in ckpt:
             torch.set_rng_state(ckpt["torch_rng_state"].cpu())
         if torch.cuda.is_available() and ckpt.get("cuda_rng_state") is not None:
-            torch.cuda.set_rng_state_all(ckpt["cuda_rng_state"])
+            torch.cuda.set_rng_state_all(
+                _cpu_byte_rng_states(ckpt["cuda_rng_state"])
+            )
 
     @property
     def global_step(self):

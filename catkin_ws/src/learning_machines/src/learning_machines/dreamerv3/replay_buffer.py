@@ -254,8 +254,7 @@ class ReplayBuffer:
         event_episode_indices = [
             index
             for index, episode in enumerate(self._episodes)
-            if len(episode["reward"]) >= self.sequence_length
-            and np.any(
+            if np.any(
                 episode["reward"] >= self.reward_event_threshold
             )
         ]
@@ -275,23 +274,22 @@ class ReplayBuffer:
             episode = self._episodes[ep_idx]
             ep_len = len(episode["reward"])
 
-            # Skip if episode is too short
-            if ep_len < self.sequence_length:
-                continue
+            # For short episodes, use the full episode length as the sequence length
+            seq_len = min(self.sequence_length, ep_len)
 
             # Oversample windows containing sparse reward events.
-            max_start = ep_len - self.sequence_length
+            max_start = ep_len - seq_len
             event_indices = np.flatnonzero(
                 episode["reward"] >= self.reward_event_threshold
             )
             if request_event and event_indices.size > 0:
                 event = int(np.random.choice(event_indices))
-                lower = max(0, event - self.sequence_length + 1)
+                lower = max(0, event - seq_len + 1)
                 upper = min(event, max_start)
                 start = np.random.randint(lower, upper + 1)
             else:
                 start = np.random.randint(0, max_start + 1)
-            end = start + self.sequence_length
+            end = start + seq_len
 
             # Check that no done=True in the middle (only at the end is ok)
             mid_dones = episode["done"][start:end - 1]
@@ -324,12 +322,10 @@ class ReplayBuffer:
                 episode = self._episodes[ep_idx]
                 ep_len = len(episode["reward"])
 
-                if ep_len < self.sequence_length:
-                    raise ValueError(
-                        "no finalized episode is long enough for the configured sequence_length"
-                    )
-                start = np.random.randint(0, ep_len - self.sequence_length + 1)
-                end = start + self.sequence_length
+                # Use full episode length if shorter than sequence_length
+                seq_len = min(self.sequence_length, ep_len)
+                start = np.random.randint(0, ep_len - seq_len + 1)
+                end = start + seq_len
 
                 batch_obs.append(episode["obs"][start:end + 1])
                 batch_action.append(episode["action"][start:end])
@@ -348,12 +344,35 @@ class ReplayBuffer:
                     )
                 )
 
+        # Truncate all samples to the minimum length in the batch
+        # to avoid padding issues (padded positions would contribute to loss)
+        min_obs_len = min(arr.shape[0] for arr in batch_obs)
+        min_action_len = min(arr.shape[0] for arr in batch_action)
+        # Use the min across obs (seq_len+1) and action (seq_len)
+        # obs has one more step than action
+        effective_seq_len = min(min_action_len, min_obs_len - 1)
+
         result = {
-            "obs": torch.tensor(np.array(batch_obs), device=device),
-            "action": torch.tensor(np.array(batch_action), device=device),
-            "reward": torch.tensor(np.array(batch_reward), device=device),
-            "done": torch.tensor(np.array(batch_done), device=device),
-            "discount": torch.tensor(np.array(batch_discount), device=device),
+            "obs": torch.tensor(
+                np.array([arr[:effective_seq_len + 1] for arr in batch_obs]),
+                device=device,
+            ),
+            "action": torch.tensor(
+                np.array([arr[:effective_seq_len] for arr in batch_action]),
+                device=device,
+            ),
+            "reward": torch.tensor(
+                np.array([arr[:effective_seq_len] for arr in batch_reward]),
+                device=device,
+            ),
+            "done": torch.tensor(
+                np.array([arr[:effective_seq_len] for arr in batch_done]),
+                device=device,
+            ),
+            "discount": torch.tensor(
+                np.array([arr[:effective_seq_len] for arr in batch_discount]),
+                device=device,
+            ),
             "index": torch.tensor(np.array(batch_indices), device=device),
             "reward_event_sample_fraction": torch.tensor(
                 event_samples / max(1, batch_size),
@@ -364,6 +383,9 @@ class ReplayBuffer:
 
         # Include IR data if available
         if self.ir_dim > 0 and len(batch_ir) > 0:
-            result["ir"] = torch.tensor(np.array(batch_ir), device=device)
+            result["ir"] = torch.tensor(
+                np.array([arr[:effective_seq_len + 1] for arr in batch_ir]),
+                device=device,
+            )
 
         return result

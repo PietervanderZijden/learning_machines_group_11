@@ -149,6 +149,7 @@ class WorldModel(nn.Module):
             stochastic_classes=stochastic_classes,
             stochastic_bins=stochastic_bins,
             hidden_size=hidden_size,
+            obs_is_embedding=(use_multimodal or use_images),
         )
 
         rssm_state_size = deterministic_size + self.rssm.stochastic_size
@@ -163,7 +164,10 @@ class WorldModel(nn.Module):
                 nn.LayerNorm(embed_size // 2),
             )
             self.obs_decoder = CNNDecoder(state_dim=rssm_state_size, image_size=image_size)
-            self.ir_decoder = mlp(rssm_state_size, mlp_hidden, ir_dim, mlp_layers)
+            self.ir_decoder = nn.Sequential(
+                mlp(rssm_state_size, mlp_hidden, ir_dim, mlp_layers),
+                nn.Sigmoid(),
+            )
         elif use_images:
             # CNN encoder: image -> embed
             self.obs_encoder = CNNEncoder(embed_dim=embed_size, image_size=image_size)
