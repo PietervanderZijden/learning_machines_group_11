@@ -187,7 +187,11 @@ def _save_blob_overlay(path: Path, image: np.ndarray, blob: np.ndarray) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--algorithm", required=True, choices=["sac", "dreamerv3", "dreamerv4"])
+    parser.add_argument(
+        "--algorithm",
+        required=True,
+        choices=["sac", "dreamerv3", "dreamerv4", "dreamerv4-full"],
+    )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--manifest")
     parser.add_argument("--port", type=int, default=23000)
@@ -234,7 +238,12 @@ def main():
     os.environ["COPPELIA_SIM_PORT"] = str(args.port)
 
     import torch
-    from deploy_hardware import DreamerV3Policy, DreamerV4Policy, SACPolicy
+    from deploy_hardware import (
+        DreamerV3Policy,
+        DreamerV4FullPolicy,
+        DreamerV4Policy,
+        SACPolicy,
+    )
     from learning_machines.domain_randomization import (
         DomainRandomizationWrapper,
         RandomizationRanges,
@@ -260,8 +269,10 @@ def main():
         policy = SACPolicy(args.checkpoint)
     elif args.algorithm == "dreamerv3":
         policy = DreamerV3Policy(args.checkpoint)
-    else:
+    elif args.algorithm == "dreamerv4":
         policy = DreamerV4Policy(args.checkpoint, device)
+    else:
+        policy = DreamerV4FullPolicy(args.checkpoint, device)
 
     env = RoboboCompactEnv(config=RoboboCompactEnvConfig(
         return_image=True,

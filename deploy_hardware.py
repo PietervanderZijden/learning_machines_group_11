@@ -178,6 +178,51 @@ class DreamerV4Policy(Policy):
         return action.squeeze(0).cpu().numpy()
 
 
+class DreamerV4FullPolicy(Policy):
+    def __init__(self, checkpoint: str, device):
+        from learning_machines.dreamerv4_full import DreamerV4FullAgent
+        self.agent = DreamerV4FullAgent.load(checkpoint, device)
+        self.device = device
+        self.reset()
+
+    def reset(self):
+        self.images = []
+        self.irs = []
+        self.executed_actions = []
+
+    def act(self, obs: dict) -> np.ndarray:
+        import torch
+        self.images.append(
+            torch.from_numpy(obs["image"]).float().to(self.device) / 255.0
+        )
+        if self.agent.cfg.ir_dim:
+            self.irs.append(
+                torch.from_numpy(obs["ir"]).float().to(self.device)
+            )
+        context = self.agent.cfg.context_length
+        images = torch.stack(self.images[-context:]).unsqueeze(0)
+        ir = (
+            torch.stack(self.irs[-context:]).unsqueeze(0)
+            if self.agent.cfg.ir_dim else None
+        )
+        latent = self.agent.tokenizer.encode(images, ir)
+        retained_actions = self.executed_actions[-latent.shape[1]:]
+        previous = torch.zeros(
+            1, latent.shape[1], self.agent.cfg.action_dim, device=self.device
+        )
+        if retained_actions:
+            previous[:, -len(retained_actions):] = torch.as_tensor(
+                np.stack(retained_actions), device=self.device
+            )
+        with torch.no_grad():
+            hidden = self.agent._clean_agent_hidden(latent, previous, None)[:, -1]
+            action = self.agent.policy.sample(hidden, deterministic=True)[0]
+        return action[0].cpu().numpy()
+
+    def observe_executed(self, action: np.ndarray):
+        self.executed_actions.append(np.asarray(action, dtype=np.float32).copy())
+
+
 def stop_robot(rob) -> None:
     try:
         rob.set_wheel_speeds(0, 0, duration_s=0.4)
@@ -190,7 +235,11 @@ def stop_robot(rob) -> None:
 
 def main(rob=None, argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--algorithm", required=True, choices=["sac", "dreamerv3", "dreamerv4"])
+    parser.add_argument(
+        "--algorithm",
+        required=True,
+        choices=["sac", "dreamerv3", "dreamerv4", "dreamerv4-full"],
+    )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--manifest", default=None)
     parser.add_argument("--calibration", required=True)
@@ -305,8 +354,10 @@ def main(rob=None, argv=None):
         policy = SACPolicy(args.checkpoint)
     elif args.algorithm == "dreamerv3":
         policy = DreamerV3Policy(args.checkpoint)
-    else:
+    elif args.algorithm == "dreamerv4":
         policy = DreamerV4Policy(args.checkpoint, device)
+    else:
+        policy = DreamerV4FullPolicy(args.checkpoint, device)
 
     if rob is None:
         from robobo_interface import HardwareRobobo
