@@ -530,6 +530,116 @@ def test_push_reward_progress_success_and_timeout_behavior():
     assert env.max_episode_seconds == 0.4
 
 
+def test_push_layout_randomization_moves_block_and_goal_with_constraints():
+    class FakePushSim:
+        handle_world = -1
+
+        def __init__(self):
+            self.positions = {
+                1: [-3.2, 0.6, 0.025],
+                2: [-2.8, 1.0, 0.005],
+            }
+            self.objects = {
+                "/Food": 1,
+                "Food": 1,
+                "/Base": 2,
+                "Base": 2,
+            }
+            self.reset_handles = []
+
+        def getObject(self, name):
+            return self.objects[name]
+
+        def getObjectPosition(self, handle, _world):
+            return list(self.positions[handle])
+
+        def setObjectPosition(self, handle, position):
+            self.positions[handle] = list(position)
+
+        def resetDynamicObject(self, handle):
+            self.reset_handles.append(handle)
+
+    class FakePushRob:
+        def __init__(self):
+            self._sim = FakePushSim()
+
+    env = RoboboCompactEnv.__new__(RoboboCompactEnv)
+    env.config = RoboboCompactEnvConfig(
+        task="push",
+        randomize_push_layout=True,
+        push_arena_radius=0.8,
+        push_min_robot_distance=0.25,
+        push_min_block_goal_distance=0.35,
+        push_max_block_goal_distance=1.1,
+        push_success_distance=0.12,
+    )
+    env.rob = FakePushRob()
+    env._is_simulation = True
+    env._red_block_handle = None
+    env._green_goal_handle = None
+    env._red_block_z = 0.0
+    env._green_goal_z = 0.0
+    env._arena_cx, env._arena_cy = env.config.arena_center
+    env._initial_pos_x = env._arena_cx
+    env._initial_pos_y = env._arena_cy
+
+    env._ensure_push_handles()
+
+    assert env._red_block_handle == 1
+    assert env._green_goal_handle == 2
+    assert env._red_block_z == 0.025
+    assert env._green_goal_z == 0.005
+
+    env._randomize_push_layout()
+
+    block = env.rob._sim.positions[1]
+    goal = env.rob._sim.positions[2]
+    block_xy = (block[0], block[1])
+    goal_xy = (goal[0], goal[1])
+    assert env._push_layout_randomized is True
+    assert block[2] == 0.025
+    assert goal[2] == 0.005
+    assert 0.25 <= env._xy_distance(block_xy, (env._initial_pos_x, env._initial_pos_y))
+    assert 0.25 <= env._xy_distance(goal_xy, (env._initial_pos_x, env._initial_pos_y))
+    block_goal_distance = env._xy_distance(block_xy, goal_xy)
+    assert 0.35 <= block_goal_distance <= 1.1
+    assert env.rob._sim.reset_handles == [1, 2]
+
+
+def test_push_layout_randomization_can_be_disabled():
+    class FakePushSim:
+        handle_world = -1
+
+        def __init__(self):
+            self.positions = {
+                1: [-3.2, 0.6, 0.025],
+                2: [-2.8, 1.0, 0.005],
+            }
+
+        def getObjectPosition(self, handle, _world):
+            return list(self.positions[handle])
+
+        def setObjectPosition(self, handle, position):
+            self.positions[handle] = list(position)
+
+    class FakePushRob:
+        def __init__(self):
+            self._sim = FakePushSim()
+
+    env = RoboboCompactEnv.__new__(RoboboCompactEnv)
+    env.config = RoboboCompactEnvConfig(task="push", randomize_push_layout=False)
+    env.rob = FakePushRob()
+    env._is_simulation = True
+    env._red_block_handle = 1
+    env._green_goal_handle = 2
+    before = dict(env.rob._sim.positions)
+
+    env._randomize_push_layout()
+
+    assert env._push_layout_randomized is False
+    assert env.rob._sim.positions == before
+
+
 def test_sac_push_observation_is_18_values_and_old_manifest_is_rejected(tmp_path):
     from train_sac import RoboboSACEnv
     from learning_machines.transfer import CheckpointManifest
@@ -649,15 +759,25 @@ def test_simulation_and_dynamics_timesteps_are_configured_separately():
         simulation_stopped = 0
         floatparam_simulation_time_step = 4
         floatparam_physicstimestep = 5
+        boolparam_realtime_simulation = 6
+        intparam_idle_fps = 7
 
         def __init__(self):
             self.values = {}
+            self.bool_values = {}
+            self.int_values = {}
 
         def getSimulationState(self):
             return self.simulation_stopped
 
         def setFloatParam(self, parameter, value):
             self.values[parameter] = value
+
+        def setBoolParam(self, parameter, value):
+            self.bool_values[parameter] = value
+
+        def setInt32Param(self, parameter, value):
+            self.int_values[parameter] = value
 
         def getSimulationTimeStep(self):
             return self.values[self.floatparam_simulation_time_step]
@@ -675,8 +795,11 @@ def test_simulation_and_dynamics_timesteps_are_configured_separately():
     rob = SimulationRobobo.__new__(SimulationRobobo)
     rob._sim = FakeSim()
     rob._client = FakeClient()
+    rob._logger = lambda _message: None
     rob.configure_simulation_timing()
 
     assert rob._sim.values[rob._sim.floatparam_simulation_time_step] == 0.4
     assert rob._sim.values[rob._sim.floatparam_physicstimestep] == 0.005
+    assert rob._sim.bool_values[rob._sim.boolparam_realtime_simulation] is False
+    assert rob._sim.int_values[rob._sim.intparam_idle_fps] == 0
     assert rob._client.stepping is True

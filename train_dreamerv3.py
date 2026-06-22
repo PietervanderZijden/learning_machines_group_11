@@ -232,6 +232,12 @@ def main():
         default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
     )
     parser.add_argument("--max-episode-steps", type=int, default=150)
+    parser.add_argument(
+        "--push-layout-randomization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Randomize red block and green goal positions on each simulator reset.",
+    )
     parser.add_argument("--checkpoint-dir", type=str, default="dreamerv3_models")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument(
@@ -433,6 +439,7 @@ def main():
             "control_interval_seconds": 0.4,
             "phone_tilt": 100,
             "task": "push",
+            "push_layout_randomization": args.push_layout_randomization,
             "model_size": cfg.model_size,
             "world_lr": cfg.world_lr,
             "actor_lr": cfg.actor_lr,
@@ -450,6 +457,7 @@ def main():
         return_image=True,
         image_obs_size=(args.image_size, args.image_size),
         calibration_path=args.calibration,
+        randomize_push_layout=args.push_layout_randomization,
         time_penalty_per_second=args.time_penalty_per_second,
         push_time_penalty_per_second=args.time_penalty_per_second,
         action_change_penalty=args.action_change_penalty,
@@ -536,6 +544,10 @@ def main():
             "reward_contract": (
                 manifest.reward_contract,
                 "robobo-push-reward-v1",
+            ),
+            "push_layout_randomization": (
+                manifest.algorithm_config.get("push_layout_randomization"),
+                args.push_layout_randomization,
             ),
         }
         manifest_mismatches = {
@@ -767,6 +779,7 @@ def main():
                     "episode/block_goal_progress": float(info.get("block_goal_progress", 0.0)),
                     "episode/red_block_visible": float(info.get("red_block_visible", 0.0)),
                     "episode/green_goal_visible": float(info.get("green_goal_visible", 0.0)),
+                    "episode/push_layout_randomized": float(info.get("push_layout_randomized", 0.0)),
                     "episode/collisions": int(episode_collisions),
                     "episode/safety_overrides": int(episode_safety_overrides),
                     "episode/mean_action_change": episode_action_change / max(1, episode_length),
@@ -961,6 +974,7 @@ def main():
                 "critic_lr": cfg.critic_lr,
                 "use_multimodal": cfg.use_multimodal,
                 "task": "push",
+                "push_layout_randomization": args.push_layout_randomization,
                 "model_size": cfg.model_size,
                 "cnn_base_channels": cfg.cnn_base_channels,
                 "block_gru_blocks": cfg.block_gru_blocks,
