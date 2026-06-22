@@ -59,6 +59,36 @@ def dreamer_updates_per_env_step(
     return replay_ratio / (batch_size * sequence_length)
 
 
+THROUGHPUT_PRESETS = {
+    "paper": {},
+    "balanced": {
+        "train_ratio": 128.0,
+        "batch_size": 8,
+        "sequence_length": 48,
+        "imagination_starts": 8,
+        "prefill_steps": 2000,
+        "image_size": 64,
+    },
+    "fast": {
+        "train_ratio": 64.0,
+        "batch_size": 8,
+        "sequence_length": 32,
+        "imagination_starts": 4,
+        "prefill_steps": 1000,
+        "image_size": 48,
+    },
+}
+
+
+def _explicit_cli_options(argv: list[str]) -> set[str]:
+    options: set[str] = set()
+    for arg in argv:
+        if not arg.startswith("--"):
+            continue
+        options.add(arg.split("=", 1)[0])
+    return options
+
+
 def _fmt_value(value) -> str:
     if isinstance(value, int):
         return f"{value:,}"
@@ -247,6 +277,15 @@ def main():
     )
     parser.add_argument("--wandb-run-name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--throughput-preset",
+        choices=tuple(THROUGHPUT_PRESETS),
+        default="paper",
+        help=(
+            "Preset for live training speed. paper keeps paper-like defaults; "
+            "balanced/fast reduce update frequency, sequence length, and imagination starts."
+        ),
+    )
     parser.add_argument("--prefill-steps", type=int, default=5000)
     parser.add_argument(
         "--train-ratio",
@@ -337,7 +376,13 @@ def main():
     parser.add_argument("--curriculum-one-food-steps", type=int, default=100_000)
     parser.add_argument("--curriculum-three-food-steps", type=int, default=250_000)
     parser.add_argument("--randomization-start-steps", type=int, default=300_000)
+    explicit_options = _explicit_cli_options(sys.argv[1:])
     args = parser.parse_args()
+    preset_overrides = THROUGHPUT_PRESETS[args.throughput_preset]
+    for key, value in preset_overrides.items():
+        option = "--" + key.replace("_", "-")
+        if option not in explicit_options:
+            setattr(args, key, value)
     if args.learning_rate <= 0:
         parser.error("--learning-rate must be positive")
     if args.world_learning_rate is not None and args.world_learning_rate <= 0:
@@ -359,7 +404,15 @@ def main():
     os.environ["COPPELIA_SIM_IP"] = args.host
     print(
         f"DreamerV3 effective configuration: "
-        f"simulator={args.host}:{args.port}",
+        f"simulator={args.host}:{args.port}, "
+        f"throughput_preset={args.throughput_preset}, "
+        f"train_ratio={args.train_ratio}, "
+        f"batch_size={args.batch_size}, "
+        f"sequence_length={args.sequence_length}, "
+        f"imagination_starts={args.imagination_starts}, "
+        f"image_size={args.image_size}, "
+        f"target_updates_per_env_step="
+        f"{dreamer_updates_per_env_step(args.train_ratio, args.batch_size, args.sequence_length):.4f}",
         flush=True,
     )
     from learning_machines.coppelia_startup import check_coppelia_service
