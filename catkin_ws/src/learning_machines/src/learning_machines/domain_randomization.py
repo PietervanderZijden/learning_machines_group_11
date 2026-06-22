@@ -27,7 +27,7 @@ class RandomizationRanges:
     camera_exposure: tuple[float, float] = (-0.12, 0.12)
     camera_contrast: tuple[float, float] = (0.85, 1.15)
     camera_color_balance: tuple[float, float] = (0.9, 1.1)
-    camera_color_balance_enabled: bool = True
+    camera_color_balance_enabled: bool = False
     camera_crop_fraction: tuple[float, float] = (0.0, 0.04)
     camera_tilt_offset: tuple[int, int] = (-4, 4)
     camera_shift_pixels: tuple[float, float] = (-3.0, 3.0)

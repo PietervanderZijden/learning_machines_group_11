@@ -387,6 +387,9 @@ class SimulationRobobo(IRobobo):
                 if not self.is_running():
                     return
                 try:
+                    self._client.socket.setsockopt(
+                        zmq.RCVTIMEO, 30000
+                    )
                     self._client.step()
                 except zmq.ZMQError as exc:
                     raise RuntimeError(
