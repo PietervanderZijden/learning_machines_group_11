@@ -1,0 +1,15 @@
+{
+  "name": "simulation",
+  "version": "robobo-obs-v2",
+  "source": "conservative-default",
+  "sensors": {
+    "BackL": {"free_space": 0.0, "near_obstacle": 400.0, "polarity": 1, "exponent": 1.0},
+    "BackR": {"free_space": 0.0, "near_obstacle": 400.0, "polarity": 1, "exponent": 1.0},
+    "FrontL": {"free_space": 0.0, "near_obstacle": 400.0, "polarity": 1, "exponent": 1.0},
+    "FrontR": {"free_space": 0.0, "near_obstacle": 400.0, "polarity": 1, "exponent": 1.0},
+    "FrontC": {"free_space": 0.0, "near_obstacle": 400.0, "polarity": 1, "exponent": 1.0},
+    "FrontRR": {"free_space": 0.0, "near_obstacle": 400.0, "polarity": 1, "exponent": 1.0},
+    "BackC": {"free_space": 0.0, "near_obstacle": 400.0, "polarity": 1, "exponent": 1.0},
+    "FrontLL": {"free_space": 0.0, "near_obstacle": 400.0, "polarity": 1, "exponent": 1.0}
+  }
+}
