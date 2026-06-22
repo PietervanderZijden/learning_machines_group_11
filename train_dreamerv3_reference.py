@@ -2,17 +2,22 @@
 """Train NM512 DreamerV3 on Robobo food collection using our env."""
 from __future__ import annotations
 
+import argparse
+import collections
+import contextlib
 import functools
+import io
 import os
 import sys
 import pathlib
-import argparse
 import warnings
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import numpy as np
 import torch
+import wandb
+from tqdm.auto import tqdm
 from ruamel.yaml import YAML
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
@@ -34,12 +39,120 @@ import tools
 from parallel import Damy
 
 
+COLLECT_REWARD = 100.0
+
+
+class WandbLogger:
+    """Drop-in replacement for tools.Logger that logs to W&B with sections."""
+
+    ENV_KEYS = {
+        "train_return", "train_length", "train_episodes",
+        "eval_return", "eval_length", "eval_episodes", "dataset_size",
+    }
+
+    def __init__(self, step):
+        self.step = step
+        self._last_step = None
+        self._last_time = None
+        self._scalars = {}
+        self._images = {}
+        self._videos = {}
+        self._section_cache = {}
+
+    def _section(self, name):
+        if name in self._section_cache:
+            return self._section_cache[name]
+        if name.startswith("recon/"):
+            sectioned = name
+        elif name in self.ENV_KEYS:
+            sectioned = f"env/{name}"
+        elif name.startswith("log_"):
+            sectioned = f"env/{name}"
+        elif name.startswith("expl_"):
+            sectioned = f"model/{name}"
+        else:
+            sectioned = f"model/{name}"
+        self._section_cache[name] = sectioned
+        return sectioned
+
+    def scalar(self, name, value):
+        self._scalars[name] = float(value)
+
+    def image(self, name, value):
+        self._images[name] = np.array(value)
+
+    def video(self, name, value):
+        self._videos[name] = np.array(value)
+
+    def write(self, fps=False, step=False):
+        if not step:
+            step = self.step
+        log = {}
+        for name, value in self._scalars.items():
+            log[self._section(name)] = value
+        if fps:
+            log["perf/fps"] = self._compute_fps(step)
+        for name, value in self._images.items():
+            if np.issubdtype(value.dtype, np.floating):
+                value = np.clip(255 * value, 0, 255).astype(np.uint8)
+            if value.ndim == 3:
+                value = value.transpose(1, 2, 0)
+            log[name] = wandb.Image(value)
+        for name, value in self._videos.items():
+            name = name if isinstance(name, str) else name.decode("utf-8")
+            if np.issubdtype(value.dtype, np.floating):
+                value = np.clip(255 * value, 0, 255).astype(np.uint8)
+            B, T, H, W, C = value.shape
+            frames = value[0]  # (T, H, W, C) — first sample
+            log[f"video/{name}"] = wandb.Video(frames, fps=16, format="gif")
+        if log:
+            wandb.log(log, step=step)
+        self._scalars = {}
+        self._images = {}
+        self._videos = {}
+
+    def _compute_fps(self, step):
+        if self._last_step is None:
+            self._last_time = __import__("time").time()
+            self._last_step = step
+            return 0
+        steps = step - self._last_step
+        duration = __import__("time").time() - self._last_time
+        self._last_time += duration
+        self._last_step = step
+        return steps / duration
+
+
+class EpisodeStats:
+    """Tracks rolling averages of reward and food count over recent episodes."""
+
+    def __init__(self, window=100):
+        self._rewards = collections.deque(maxlen=window)
+        self._foods = collections.deque(maxlen=window)
+
+    def add(self, reward, food_count):
+        self._rewards.append(reward)
+        self._foods.append(food_count)
+
+    @property
+    def avg_reward(self):
+        return sum(self._rewards) / len(self._rewards) if self._rewards else 0.0
+
+    @property
+    def avg_food(self):
+        return sum(self._foods) / len(self._foods) if self._foods else 0.0
+
+    @property
+    def count(self):
+        return len(self._rewards)
+
+
 def make_robobo_env(config, mode, robobo_id=0):
     env_config = RoboboCompactEnvConfig(
-        initialize_phone_tilt=False,
+        initialize_phone_tilt=True,
         max_episode_steps=200,
         step_millis=400,
-        collect_reward=1.0,
+        collect_reward=COLLECT_REWARD,
         time_penalty_per_second=0.0,
         action_change_penalty=0.0,
         return_image=True,
@@ -174,8 +287,28 @@ def main():
 
     tools.set_seed_everywhere(config.seed)
 
+    checkpoint_path = logdir / "latest.pt"
+    saved_wandb_id = None
+    checkpoint = None
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        saved_wandb_id = checkpoint.get("wandb_run_id")
+
+    wandb_init_kwargs = dict(
+        project="learning-machines",
+        config={k: v for k, v in cfg.items() if isinstance(v, (int, float, str, bool, list, dict))},
+        name=logdir.name,
+    )
+    if saved_wandb_id:
+        wandb_init_kwargs["id"] = saved_wandb_id
+        wandb_init_kwargs["resume"] = "must"
+        tqdm.write(f"Resuming W&B run {saved_wandb_id}")
+    else:
+        wandb_init_kwargs["resume"] = "allow"
+    wandb.init(**wandb_init_kwargs)
+
     step = dreamer.count_steps(pathlib.Path(config.traindir))
-    logger = tools.Logger(logdir, config.action_repeat * step)
+    logger = WandbLogger(config.action_repeat * step)
 
     print(f"Starting NM512 DreamerV3 training on Robobo")
     print(f"  Log dir: {logdir}")
@@ -205,42 +338,79 @@ def main():
 
     def random_agent(o, d, s):
         action = random_actor.sample()
-        return {"action": action}, None
+        logprob = random_actor.log_prob(action)
+        return {"action": action, "logprob": logprob}, None
 
-    state = tools.simulate(
-        random_agent,
-        [train_env],
-        train_eps,
-        config.traindir,
-        logger,
-        limit=config.dataset_size,
-        steps=prefill,
-    )
-    logger.step += prefill * config.action_repeat
-    print(f"Prefill done. Logger step: {logger.step}")
+    pbar = tqdm(total=config.steps, desc="Training", unit="step", dynamic_ncols=True)
+    ep_stats = EpisodeStats(window=100)
+
+    if prefill > 0:
+        pbar.set_description("Prefilling buffer")
+        state = tools.simulate(
+            random_agent,
+            [train_env],
+            train_eps,
+            config.traindir,
+            logger,
+            limit=config.dataset_size,
+            steps=prefill,
+        )
+        logger.step += prefill * config.action_repeat
+        pbar.update(prefill)
+        tqdm.write(f"Prefill done. Logger step: {logger.step}")
+    else:
+        state = None
+
+    pbar.set_description("Training")
 
     train_dataset = dreamer.make_dataset(train_eps, config)
     eval_dataset = dreamer.make_dataset(eval_eps, config)
 
-    agent = dreamer.Dreamer(
-        train_env.observation_space,
-        train_env.action_space,
-        config,
-        logger,
-        train_dataset,
-    ).to(config.device)
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull):
+            agent = dreamer.Dreamer(
+                train_env.observation_space,
+                train_env.action_space,
+                config,
+                logger,
+                train_dataset,
+            ).to(config.device)
     agent.requires_grad_(requires_grad=False)
-    if (logdir / "latest.pt").exists():
-        checkpoint = torch.load(logdir / "latest.pt")
+    if checkpoint is not None:
         agent.load_state_dict(checkpoint["agent_state_dict"])
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
         agent._should_pretrain._once = False
+        pbar.n = agent._step
+        pbar.refresh()
+        del checkpoint
 
-    print("Start training.")
+    tqdm.write("Start training.")
+
+    class StepTracker:
+        def __init__(self, agent, pbar, obs_space, act_space):
+            self._agent = agent
+            self._pbar = pbar
+            self._last_step = agent._step
+            self.observation_space = obs_space
+            self.action_space = act_space
+
+        def __call__(self, obs, reset, state=None, training=True):
+            result = self._agent(obs, reset, state, training)
+            new_steps = self._agent._step - self._last_step
+            if new_steps > 0:
+                self._pbar.update(new_steps)
+                self._last_step = self._agent._step
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self._agent, name)
+
+    tracked_agent = StepTracker(agent, pbar, train_env.observation_space, train_env.action_space)
+
     while agent._step < config.steps + config.eval_every:
         logger.write()
-        print(f"Step {agent._step}/{config.steps} | Evaluating ({config.eval_episode_num} episodes)...")
-        eval_policy = functools.partial(agent, training=False)
+        tqdm.write(f"Step {agent._step}/{config.steps} | Evaluating ({config.eval_episode_num} episodes)...")
+        eval_policy = functools.partial(tracked_agent, training=False)
         tools.simulate(
             eval_policy,
             [eval_env],
@@ -250,13 +420,16 @@ def main():
             is_eval=True,
             episodes=config.eval_episode_num,
         )
+
         if config.video_pred_log:
             from dreamer import to_np
             video_pred = agent._wm.video_pred(next(eval_dataset))
             logger.video("eval_openl", to_np(video_pred))
-        print(f"Step {agent._step}/{config.steps} | Training {config.eval_every} steps...")
+
+        prev_step = agent._step
+        tqdm.write(f"Step {agent._step}/{config.steps} | Training {config.eval_every} steps...")
         state = tools.simulate(
-            agent,
+            tracked_agent,
             [train_env],
             train_eps,
             config.traindir,
@@ -265,19 +438,48 @@ def main():
             steps=config.eval_every,
             state=state,
         )
+
+        new_steps = agent._step - prev_step
+
+        train_eps_this_block = dict(list(train_eps.items())[-50:])
+        block_rewards = []
+        block_foods = []
+        for ep_data in train_eps_this_block.values():
+            ep_len = len(ep_data["reward"]) - 1
+            if ep_len < 1:
+                continue
+            ep_reward = float(np.array(ep_data["reward"]).sum())
+            block_rewards.append(ep_reward)
+            block_foods.append(ep_reward / COLLECT_REWARD)
+        if block_rewards:
+            recent_reward = block_rewards[-1]
+            recent_food = block_foods[-1]
+            ep_stats.add(recent_reward, recent_food)
+
+        pbar.set_postfix({
+            "reward": f"{ep_stats.avg_reward:.0f}",
+            "food": f"{ep_stats.avg_food:.1f}",
+            "eps": ep_stats.count,
+        })
+
         items_to_save = {
             "agent_state_dict": agent.state_dict(),
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+            "wandb_run_id": wandb.run.id,
         }
         torch.save(items_to_save, logdir / "latest.pt")
-        print(f"Step {agent._step}/{config.steps} | Saved checkpoint.")
+        tqdm.write(f"Step {agent._step}/{config.steps} | Saved checkpoint.")
+
+    pbar.close()
 
     for env in [train_env, eval_env]:
         try:
             env.close()
         except Exception:
             pass
-    print(f"Training complete.")
+
+    wandb.finish()
+    tqdm.write(f"Training complete.")
 
 
 if __name__ == "__main__":
