@@ -27,6 +27,7 @@ class RandomizationRanges:
     camera_exposure: tuple[float, float] = (-0.12, 0.12)
     camera_contrast: tuple[float, float] = (0.85, 1.15)
     camera_color_balance: tuple[float, float] = (0.9, 1.1)
+    camera_color_balance_enabled: bool = True
     camera_crop_fraction: tuple[float, float] = (0.0, 0.04)
     camera_tilt_offset: tuple[int, int] = (-4, 4)
     camera_shift_pixels: tuple[float, float] = (-3.0, 3.0)
@@ -112,7 +113,11 @@ class DomainRandomizationWrapper(gym.Wrapper):
             "smoothing_previous_weight": float(self._uniform(r.smoothing_previous_weight)),
             "camera_exposure": float(self._uniform(r.camera_exposure)),
             "camera_contrast": float(self._uniform(r.camera_contrast)),
-            "camera_color_balance": self._uniform(r.camera_color_balance, 3).astype(np.float32),
+            "camera_color_balance": (
+                self._uniform(r.camera_color_balance, 3).astype(np.float32)
+                if r.camera_color_balance_enabled
+                else np.ones(3, dtype=np.float32)
+            ),
             "camera_crop_fraction": float(self._uniform(r.camera_crop_fraction)),
             "camera_tilt_offset": int(self.rng.integers(
                 r.camera_tilt_offset[0], r.camera_tilt_offset[1] + 1
