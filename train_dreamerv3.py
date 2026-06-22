@@ -730,6 +730,7 @@ def main():
     episode_saturation = 0.0
     episode_safety_with_visible_block = 0
     update_budget = 0.0
+    last_recon_step = -args.log_interval
     best_success_rate = float("-inf")
     best_metrics_path = checkpoint_dir / "best_metrics.json"
     if best_metrics_path.exists():
@@ -969,7 +970,7 @@ def main():
                     if wandb_run is not None:
                         payload = {f"train/{k}": float(v) for k, v in losses.items()}
                         payload["global_step"] = agent.global_step
-                        if agent.global_step % args.log_interval == 0:
+                        if agent.global_step - last_recon_step >= args.log_interval:
                             import wandb
                             from learning_machines.distributional import logits_to_value
                             with torch.no_grad():
@@ -1018,6 +1019,7 @@ def main():
                                     fps=4, format="gif",
                                     caption="left=target  right=prediction",
                                 )
+                            last_recon_step = agent.global_step
                         wandb_run.log(payload)
                     logger.record_train(losses)
 
