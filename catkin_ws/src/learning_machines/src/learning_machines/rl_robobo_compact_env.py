@@ -24,6 +24,7 @@ from learning_machines.transfer import (
 
 @dataclass
 class RoboboCompactEnvConfig:
+    task: str = "food_collection"
     image_size: tuple[int, int] = (64, 64)
     max_wheel_speed: int = 100
     step_millis: int = 400
@@ -60,6 +61,17 @@ class RoboboCompactEnvConfig:
     blob_track_max_distance: float = 0.30
     blob_track_max_missed: int = 6
     active_food_count: int | None = None
+    push_success_distance: float = 0.18
+    push_success_reward: float = 100.0
+    push_progress_scale: float = 25.0
+    push_time_penalty_per_second: float = 0.1
+    push_action_change_penalty: float = 0.01
+    push_red_hsv_low_1: tuple[int, int, int] = (0, 80, 60)
+    push_red_hsv_high_1: tuple[int, int, int] = (12, 255, 255)
+    push_red_hsv_low_2: tuple[int, int, int] = (168, 80, 60)
+    push_red_hsv_high_2: tuple[int, int, int] = (180, 255, 255)
+    push_green_hsv_low: tuple[int, int, int] = (35, 70, 60)
+    push_green_hsv_high: tuple[int, int, int] = (90, 255, 255)
 
 
 @dataclass
@@ -97,10 +109,23 @@ class RoboboCompactEnv(gym.Env):
         self.rob = rob
         self._is_simulation = hasattr(rob, "_sim")
 
+        if self.config.task not in {"food_collection", "push"}:
+            raise ValueError("task must be 'food_collection' or 'push'")
+
         obs_spaces = {
-            "blob": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
             "ir": spaces.Box(low=0.0, high=1.0, shape=(8,), dtype=np.float32),
         }
+        if self.config.task == "push":
+            obs_spaces["red_block"] = spaces.Box(
+                low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32
+            )
+            obs_spaces["green_goal"] = spaces.Box(
+                low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32
+            )
+        else:
+            obs_spaces["blob"] = spaces.Box(
+                low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32
+            )
         if self.config.return_image:
             h, w = self.config.image_obs_size
             obs_spaces["image"] = spaces.Box(low=0, high=255, shape=(3, h, w), dtype=np.uint8)
@@ -133,6 +158,8 @@ class RoboboCompactEnv(gym.Env):
         self.action_executor = ActionExecutor(smoothing=smoothing)
         self._latest_ir = np.zeros(8, dtype=np.float32)
         self._latest_blob = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
+        self._latest_red_block = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
+        self._latest_green_goal = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
         self._elapsed_seconds = 0.0
         self._collision_count = 0
         self._safety_override_count = 0
@@ -141,6 +168,9 @@ class RoboboCompactEnv(gym.Env):
         self._last_observation_wall_time = time.monotonic()
         self._observation_sim_seconds = 0.0
         self._tracked_blob: np.ndarray | None = None
+        self._red_block_handle: int | None = None
+        self._green_goal_handle: int | None = None
+        self._previous_block_goal_distance: float | None = None
         self._blob_track_missed = 0
         self._blob_target_switches = 0
         self._blob_target_confidence = 0.0
@@ -192,8 +222,12 @@ class RoboboCompactEnv(gym.Env):
             self._observation_sim_seconds = max(
                 0.0, self.rob.get_sim_time() - observation_sim_start
             )
+        if self.config.task == "push":
+            self._previous_block_goal_distance = self._block_goal_distance(obs)
         self._last_observation_wall_time = time.monotonic()
         info = self._get_info(obs_context)
+        if self.config.task == "push":
+            info.update(self._push_observation_info(obs, progress=0.0))
         info["phone_tilt"] = self._read_phone_tilt()
         return obs, info
 
@@ -257,11 +291,6 @@ class RoboboCompactEnv(gym.Env):
             **obs_context.timing,
         }
 
-        new_food = info["food_collected"]
-        newly_collected = max(0, new_food - self._prev_food_count)
-        self._prev_food_count = new_food
-
-        terminated = new_food >= self._num_food
         observation_wall_time = time.monotonic()
         elapsed_delta_seconds = duration_s
         if not self._is_simulation:
@@ -271,6 +300,40 @@ class RoboboCompactEnv(gym.Env):
         self._last_observation_wall_time = observation_wall_time
         self._elapsed_seconds += elapsed_delta_seconds
         truncated = self._elapsed_seconds >= self.max_episode_seconds - 1e-9
+        if self.config.task == "push":
+            reward, terminated, reward_info = self._push_reward(
+                obs=obs,
+                elapsed_delta_seconds=elapsed_delta_seconds,
+                collision=bool(info["collision"]),
+                action_change=action_info["action_change"],
+            )
+            self._collision_count += int(bool(info["collision"]))
+            self._safety_override_count += int(action_info["safety_override"] is not None)
+            self._action_change_total += action_info["action_change"]
+            self._saturation_total += action_info["action_saturation"]
+            info["left_speed"] = left_speed
+            info["right_speed"] = right_speed
+            info.update(reward_info)
+            info.update(action_info)
+            info["elapsed_seconds"] = self._elapsed_seconds
+            info["transition_seconds"] = elapsed_delta_seconds
+            info["collisions"] = self._collision_count
+            info["safety_overrides"] = self._safety_override_count
+            info["mean_action_change"] = self._action_change_total / self._step_count
+            info["action_saturation_rate"] = self._saturation_total / self._step_count
+            info["red_block_visible"] = float(obs["red_block"][3] > 0.5)
+            info["green_goal_visible"] = float(obs["green_goal"][3] > 0.5)
+            info["safety_with_visible_block"] = float(
+                action_info["safety_override"] is not None
+                and obs["red_block"][3] > 0.5
+            )
+            return obs, reward, terminated, truncated, info
+
+        new_food = info["food_collected"]
+        newly_collected = max(0, new_food - self._prev_food_count)
+        self._prev_food_count = new_food
+
+        terminated = new_food >= self._num_food
         reward, reward_info = transfer_reward(
             newly_collected=newly_collected,
             elapsed_delta_seconds=elapsed_delta_seconds,
@@ -327,8 +390,12 @@ class RoboboCompactEnv(gym.Env):
         self.rob.configure_simulation_timing()
 
         self._ensure_food_handles()
+        if self.config.task == "push":
+            self._ensure_push_handles()
         self._cache_initial_position()
-        if self.config.randomize_food_positions:
+        if self.config.task == "push":
+            pass
+        elif self.config.randomize_food_positions:
             self._randomize_food_positions()
         elif self.config.active_food_count is not None:
             self._apply_food_curriculum()
@@ -460,6 +527,7 @@ class RoboboCompactEnv(gym.Env):
         self._blob_track_missed = 0
         self._blob_target_switches = 0
         self._blob_target_confidence = 0.0
+        self._previous_block_goal_distance = None
 
     def _cache_initial_position(self) -> None:
         try:
@@ -495,6 +563,57 @@ class RoboboCompactEnv(gym.Env):
             except Exception:
                 pass
         self._num_food = max(1, len(self._food_handles))
+
+    def _ensure_push_handles(self) -> None:
+        if self._push_handles_are_valid():
+            return
+        self._red_block_handle = self._find_sim_object((
+            "/red_block",
+            "/RedBlock",
+            "/Red_Block",
+            "/Block",
+            "/push_block",
+            "/PushBlock",
+            "red_block",
+            "RedBlock",
+        ))
+        self._green_goal_handle = self._find_sim_object((
+            "/green_goal",
+            "/GreenGoal",
+            "/Green_Goal",
+            "/Goal",
+            "/goal",
+            "/push_goal",
+            "/PushGoal",
+            "green_goal",
+            "GreenGoal",
+        ))
+
+    def _find_sim_object(self, names: tuple[str, ...]) -> int | None:
+        if not self._is_simulation:
+            return None
+        sim = self.rob._sim
+        for name in names:
+            try:
+                handle = sim.getObject(name)
+                if handle >= 0:
+                    return int(handle)
+            except Exception:
+                pass
+        return None
+
+    def _push_handles_are_valid(self) -> bool:
+        if not self._is_simulation:
+            return False
+        if self._red_block_handle is None or self._green_goal_handle is None:
+            return False
+        try:
+            sim = self.rob._sim
+            sim.getObjectPosition(self._red_block_handle, sim.handle_world)
+            sim.getObjectPosition(self._green_goal_handle, sim.handle_world)
+            return True
+        except Exception:
+            return False
 
     def _randomize_food_positions(self) -> None:
         sim = self.rob._sim
@@ -601,7 +720,11 @@ class RoboboCompactEnv(gym.Env):
         else:
             timing["image_read"] = 0.0
 
-        if self.config.detect_blob_from_camera and image_bgr is not None:
+        if (
+            self.config.task == "food_collection"
+            and self.config.detect_blob_from_camera
+            and image_bgr is not None
+        ):
             blob_start = time.perf_counter()
             blob = self._detect_blob(image_bgr)
             timing["blob_detection"] = time.perf_counter() - blob_start
@@ -609,11 +732,39 @@ class RoboboCompactEnv(gym.Env):
             blob = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
             timing["blob_detection"] = 0.0
 
-        obs = {
-            "blob": blob,
-            "ir": irs,
-        }
-        self._latest_blob = blob.copy()
+        if self.config.task == "push":
+            if self.config.detect_blob_from_camera and image_bgr is not None:
+                push_start = time.perf_counter()
+                red_block = self._detect_color_blob(
+                    image_bgr,
+                    (
+                        (self.config.push_red_hsv_low_1, self.config.push_red_hsv_high_1),
+                        (self.config.push_red_hsv_low_2, self.config.push_red_hsv_high_2),
+                    ),
+                )
+                green_goal = self._detect_color_blob(
+                    image_bgr,
+                    ((self.config.push_green_hsv_low, self.config.push_green_hsv_high),),
+                )
+                timing["push_blob_detection"] = time.perf_counter() - push_start
+            else:
+                red_block = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
+                green_goal = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
+                timing["push_blob_detection"] = 0.0
+            obs = {
+                "red_block": red_block,
+                "green_goal": green_goal,
+                "ir": irs,
+            }
+            self._latest_red_block = red_block.copy()
+            self._latest_green_goal = green_goal.copy()
+            self._latest_blob = red_block.copy()
+        else:
+            obs = {
+                "blob": blob,
+                "ir": irs,
+            }
+            self._latest_blob = blob.copy()
 
         if self.config.return_image:
             if image_bgr is not None:
@@ -627,6 +778,49 @@ class RoboboCompactEnv(gym.Env):
                 obs["image"] = np.zeros((3, h, w), dtype=np.uint8)
 
         return obs, _ObsContext(raw_irs=raw_irs, irs=irs, timing=timing)
+
+    def _detect_color_blob(
+        self,
+        image_bgr: np.ndarray,
+        hsv_ranges: tuple[tuple[tuple[int, int, int], tuple[int, int, int]], ...],
+    ) -> np.ndarray:
+        if image_bgr is None or image_bgr.size == 0:
+            return np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
+
+        h, w = image_bgr.shape[:2]
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        for low, high in hsv_ranges:
+            mask = cv2.bitwise_or(
+                mask,
+                cv2.inRange(
+                    hsv,
+                    np.array(low, dtype=np.uint8),
+                    np.array(high, dtype=np.uint8),
+                ),
+            )
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._morph_kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._morph_kernel, iterations=2)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            area_ratio = area / (h * w)
+            if area_ratio < 0.001 or area_ratio > 0.5:
+                continue
+            moments = cv2.moments(contour)
+            if moments["m00"] == 0:
+                continue
+            candidates.append(np.array([
+                moments["m10"] / moments["m00"] / w,
+                moments["m01"] / moments["m00"] / h,
+                area_ratio,
+                1.0,
+            ], dtype=np.float32))
+        if not candidates:
+            return np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
+        return max(candidates, key=lambda candidate: float(candidate[2])).copy()
 
     def _detect_blob(self, image_bgr: np.ndarray) -> np.ndarray:
         if image_bgr is None or image_bgr.size == 0:
@@ -683,6 +877,96 @@ class RoboboCompactEnv(gym.Env):
         self._blob_track_missed = 0
         self._blob_target_confidence = 1.0
         return selected
+
+    def _sim_xy_distance(self) -> float | None:
+        if not self._push_handles_are_valid():
+            return None
+        try:
+            sim = self.rob._sim
+            block = sim.getObjectPosition(self._red_block_handle, sim.handle_world)
+            goal = sim.getObjectPosition(self._green_goal_handle, sim.handle_world)
+            dx = float(block[0]) - float(goal[0])
+            dy = float(block[1]) - float(goal[1])
+            return math.sqrt(dx * dx + dy * dy)
+        except Exception:
+            return None
+
+    def _camera_block_goal_distance(self, obs: dict) -> float | None:
+        red = np.asarray(obs.get("red_block", np.zeros(4)), dtype=np.float32)
+        green = np.asarray(obs.get("green_goal", np.zeros(4)), dtype=np.float32)
+        if red.shape != (4,) or green.shape != (4,):
+            return None
+        if red[3] <= 0.5 or green[3] <= 0.5:
+            return None
+        return float(np.linalg.norm(red[:2] - green[:2]))
+
+    def _block_goal_distance(self, obs: dict) -> float | None:
+        sim_distance = self._sim_xy_distance()
+        if sim_distance is not None:
+            return sim_distance
+        return self._camera_block_goal_distance(obs)
+
+    def _push_success(self, obs: dict, distance: float | None) -> bool:
+        if distance is None:
+            return False
+        if self._sim_xy_distance() is not None:
+            return distance <= self.config.push_success_distance
+        return (
+            distance <= self.config.push_success_distance
+            and obs["red_block"][3] > 0.5
+            and obs["green_goal"][3] > 0.5
+        )
+
+    def _push_observation_info(self, obs: dict, progress: float) -> dict[str, float]:
+        distance = self._block_goal_distance(obs)
+        red_visible = float(obs["red_block"][3] > 0.5)
+        green_visible = float(obs["green_goal"][3] > 0.5)
+        success = self._push_success(obs, distance)
+        return {
+            "block_goal_distance": float(distance) if distance is not None else float("nan"),
+            "block_goal_progress": float(progress),
+            "push_success": float(success),
+            "red_block_visible": red_visible,
+            "green_goal_visible": green_visible,
+        }
+
+    def _push_reward(
+        self,
+        obs: dict,
+        elapsed_delta_seconds: float,
+        collision: bool,
+        action_change: float,
+    ) -> tuple[float, bool, dict[str, float]]:
+        distance = self._block_goal_distance(obs)
+        progress = 0.0
+        if distance is not None and self._previous_block_goal_distance is not None:
+            progress = self._previous_block_goal_distance - distance
+        if distance is not None:
+            self._previous_block_goal_distance = distance
+        red_visible = float(obs["red_block"][3] > 0.5)
+        green_visible = float(obs["green_goal"][3] > 0.5)
+        success = self._push_success(obs, distance)
+        success_reward = self.config.push_success_reward if success else 0.0
+        progress_reward = self.config.push_progress_scale * progress
+        time_cost = max(0.0, elapsed_delta_seconds) * self.config.push_time_penalty_per_second
+        collision_cost = self.config.collision_penalty if collision else 0.0
+        action_change_cost = self.config.push_action_change_penalty * max(0.0, action_change)
+        reward = (
+            success_reward
+            + progress_reward
+            - time_cost
+            - collision_cost
+            - action_change_cost
+        )
+        info = self._push_observation_info(obs, progress=progress)
+        info.update({
+            "success_reward": float(success_reward),
+            "progress_reward": float(progress_reward),
+            "time_penalty": float(time_cost),
+            "collision_penalty": float(collision_cost),
+            "action_change_penalty": float(action_change_cost),
+        })
+        return float(reward), success, info
 
     def _get_info(self, obs_context: _ObsContext | None = None) -> dict:
         try:

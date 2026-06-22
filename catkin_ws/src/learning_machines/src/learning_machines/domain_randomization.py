@@ -188,11 +188,13 @@ class DomainRandomizationWrapper(gym.Wrapper):
             obs["ir"] = self._augment_ir(obs["ir"])
         if "image" in obs:
             obs["image"] = self._augment_image(obs["image"])
-        if "blob" in obs and obs["blob"][3] > 0.5:
-            blob = np.asarray(obs["blob"], dtype=np.float32).copy()
+        for key in ("blob", "red_block", "green_goal"):
+            if key not in obs or obs[key][3] <= 0.5:
+                continue
+            blob = np.asarray(obs[key], dtype=np.float32).copy()
             blob[:2] += self.rng.normal(0.0, 0.015, 2)
             blob[2] = max(0.0, blob[2] * (1.0 + self.rng.normal(0.0, 0.03)))
-            obs["blob"] = blob
+            obs[key] = blob
         return obs
 
     def reset(self, **kwargs):
