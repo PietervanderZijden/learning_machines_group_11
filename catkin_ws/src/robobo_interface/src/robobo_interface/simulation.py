@@ -631,6 +631,7 @@ class SimulationRobobo(IRobobo):
         """
         if self._sim.getSimulationState() != self._sim.simulation_stopped:
             raise RuntimeError("simulation timing can only be configured while stopped")
+        self._disable_realtime_pacing()
         self._sim.setFloatParam(self._sim.floatparam_simulation_time_step, 0.4)
         self._sim.setFloatParam(self._sim.floatparam_physicstimestep, 0.005)
         simulation_dt = float(self._sim.getSimulationTimeStep())
@@ -648,6 +649,24 @@ class SimulationRobobo(IRobobo):
                 f"got {dynamics_dt:.6f} s"
             )
         self._client.setStepping(True)
+
+    def _disable_realtime_pacing(self) -> None:
+        """Disable CoppeliaSim's wall-clock real-time throttle when available."""
+        realtime_param = getattr(self._sim, "boolparam_realtime_simulation", None)
+        if realtime_param is not None:
+            try:
+                self._sim.setBoolParam(realtime_param, False)
+            except Exception as exc:
+                self._logger(
+                    f"Warning: could not disable CoppeliaSim real-time mode: {exc}"
+                )
+
+        idle_fps_param = getattr(self._sim, "intparam_idle_fps", None)
+        if idle_fps_param is not None:
+            try:
+                self._sim.setInt32Param(idle_fps_param, 0)
+            except Exception:
+                pass
 
     def _patch_food_contact_callback(self) -> None:
         """Make food collection independent of contact handle ordering.

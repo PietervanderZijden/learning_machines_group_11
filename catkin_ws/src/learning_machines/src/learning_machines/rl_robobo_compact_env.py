@@ -61,6 +61,11 @@ class RoboboCompactEnvConfig:
     blob_track_max_distance: float = 0.30
     blob_track_max_missed: int = 6
     active_food_count: int | None = None
+    randomize_push_layout: bool = True
+    push_arena_radius: float = 0.90
+    push_min_robot_distance: float = 0.35
+    push_min_block_goal_distance: float = 0.35
+    push_max_block_goal_distance: float = 1.20
     push_success_distance: float = 0.18
     push_success_reward: float = 100.0
     push_progress_scale: float = 25.0
@@ -170,6 +175,9 @@ class RoboboCompactEnv(gym.Env):
         self._tracked_blob: np.ndarray | None = None
         self._red_block_handle: int | None = None
         self._green_goal_handle: int | None = None
+        self._red_block_z = 0.025
+        self._green_goal_z = 0.005
+        self._push_layout_randomized = False
         self._previous_block_goal_distance: float | None = None
         self._blob_track_missed = 0
         self._blob_target_switches = 0
@@ -394,7 +402,7 @@ class RoboboCompactEnv(gym.Env):
             self._ensure_push_handles()
         self._cache_initial_position()
         if self.config.task == "push":
-            pass
+            self._randomize_push_layout()
         elif self.config.randomize_food_positions:
             self._randomize_food_positions()
         elif self.config.active_food_count is not None:
@@ -572,10 +580,12 @@ class RoboboCompactEnv(gym.Env):
             "/RedBlock",
             "/Red_Block",
             "/Block",
+            "/Food",
             "/push_block",
             "/PushBlock",
             "red_block",
             "RedBlock",
+            "Food",
         ))
         self._green_goal_handle = self._find_sim_object((
             "/green_goal",
@@ -583,11 +593,14 @@ class RoboboCompactEnv(gym.Env):
             "/Green_Goal",
             "/Goal",
             "/goal",
+            "/Base",
             "/push_goal",
             "/PushGoal",
             "green_goal",
             "GreenGoal",
+            "Base",
         ))
+        self._cache_push_object_heights()
 
     def _find_sim_object(self, names: tuple[str, ...]) -> int | None:
         if not self._is_simulation:
@@ -614,6 +627,94 @@ class RoboboCompactEnv(gym.Env):
             return True
         except Exception:
             return False
+
+    def _cache_push_object_heights(self) -> None:
+        if not self._push_handles_are_valid():
+            return
+        sim = self.rob._sim
+        try:
+            block = sim.getObjectPosition(self._red_block_handle, sim.handle_world)
+            self._red_block_z = float(block[2])
+        except Exception:
+            pass
+        try:
+            goal = sim.getObjectPosition(self._green_goal_handle, sim.handle_world)
+            self._green_goal_z = float(goal[2])
+        except Exception:
+            pass
+
+    def _sample_push_point(self) -> tuple[float, float]:
+        angle = random.uniform(0.0, 2.0 * math.pi)
+        radius = random.uniform(
+            self.config.push_min_robot_distance,
+            self.config.push_arena_radius,
+        )
+        return (
+            self._arena_cx + radius * math.cos(angle),
+            self._arena_cy + radius * math.sin(angle),
+        )
+
+    @staticmethod
+    def _xy_distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+        dx = a[0] - b[0]
+        dy = a[1] - b[1]
+        return math.sqrt(dx * dx + dy * dy)
+
+    def _valid_push_layout(
+        self,
+        block_xy: tuple[float, float],
+        goal_xy: tuple[float, float],
+    ) -> bool:
+        robot_xy = (self._initial_pos_x, self._initial_pos_y)
+        if self._xy_distance(block_xy, robot_xy) < self.config.push_min_robot_distance:
+            return False
+        if self._xy_distance(goal_xy, robot_xy) < self.config.push_min_robot_distance:
+            return False
+        distance = self._xy_distance(block_xy, goal_xy)
+        min_distance = max(
+            self.config.push_min_block_goal_distance,
+            self.config.push_success_distance * 2.0,
+        )
+        return min_distance <= distance <= self.config.push_max_block_goal_distance
+
+    def _set_push_object_pose(self, handle: int | None, xy: tuple[float, float], z: float) -> None:
+        if handle is None:
+            return
+        sim = self.rob._sim
+        sim.setObjectPosition(handle, [xy[0], xy[1], z])
+        try:
+            sim.resetDynamicObject(handle)
+        except Exception:
+            pass
+
+    def _randomize_push_layout(self) -> None:
+        self._push_layout_randomized = False
+        if not self.config.randomize_push_layout or not self._push_handles_are_valid():
+            return
+
+        block_xy = goal_xy = None
+        for _ in range(100):
+            candidate_goal = self._sample_push_point()
+            candidate_block = self._sample_push_point()
+            if self._valid_push_layout(candidate_block, candidate_goal):
+                block_xy = candidate_block
+                goal_xy = candidate_goal
+                break
+
+        if block_xy is None or goal_xy is None:
+            # Deterministic fallback that is solvable and not already successful.
+            block_xy = (
+                self._arena_cx - self.config.push_min_block_goal_distance,
+                self._arena_cy,
+            )
+            goal_xy = (
+                self._arena_cx + self.config.push_min_block_goal_distance,
+                self._arena_cy,
+            )
+
+        self._set_push_object_pose(self._red_block_handle, block_xy, self._red_block_z)
+        self._set_push_object_pose(self._green_goal_handle, goal_xy, self._green_goal_z)
+        self._push_layout_randomized = True
 
     def _randomize_food_positions(self) -> None:
         sim = self.rob._sim
@@ -928,6 +1029,7 @@ class RoboboCompactEnv(gym.Env):
             "push_success": float(success),
             "red_block_visible": red_visible,
             "green_goal_visible": green_visible,
+            "push_layout_randomized": float(self._push_layout_randomized),
         }
 
     def _push_reward(

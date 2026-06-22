@@ -103,6 +103,7 @@ class RoboboSACEnv(gym.Env):
         rob=None,
         max_episode_steps=150,
         randomize_food_positions=False,
+        randomize_push_layout=True,
         domain_randomization=False,
         randomization_ranges=None,
         ir_noise_std=0.02,
@@ -135,6 +136,7 @@ class RoboboSACEnv(gym.Env):
             task="push",
             max_episode_steps=max_episode_steps,
             randomize_food_positions=randomize_food_positions,
+            randomize_push_layout=randomize_push_layout,
             time_penalty_per_second=time_penalty_per_second,
             push_time_penalty_per_second=time_penalty_per_second,
             collision_penalty=collision_penalty,
@@ -145,6 +147,7 @@ class RoboboSACEnv(gym.Env):
             image_obs_size=(image_size, image_size),
         )
         inner = RoboboCompactEnv(rob=rob, config=self._config)
+        self._base_env = inner
         self._domain_wrapper = None
         if domain_randomization:
             from learning_machines.domain_randomization import DomainRandomizationWrapper
@@ -217,9 +220,9 @@ class RoboboSACEnv(gym.Env):
             "reward_contract": np.array("robobo-push-reward-v1"),
             "control_interval_seconds": np.array(0.4),
             "calibration_profile": np.array(
-                self._inner.observation_adapter.profile.name
+                self._base_env.observation_adapter.profile.name
             ),
-            "phone_tilt": np.array(self._inner.config.phone_tilt),
+            "phone_tilt": np.array(self._base_env.config.phone_tilt),
         }
         if self._episode_irs:
             ep_data["irs"] = np.array(self._episode_irs, dtype=np.float32)
@@ -296,6 +299,12 @@ def main():
         default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
     )
     parser.add_argument("--max-episode-steps", type=int, default=150)
+    parser.add_argument(
+        "--push-layout-randomization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Randomize red block and green goal positions on each simulator reset.",
+    )
     parser.add_argument("--image-size", type=int, default=64,
                         help="Image size for recorded episodes (default: 64x64)")
     parser.add_argument("--record-dir", type=str, default="recorded_episodes",
@@ -496,6 +505,7 @@ def main():
                 "rollout/block_goal_progress": info.get("block_goal_progress"),
                 "rollout/red_block_visible": info.get("red_block_visible"),
                 "rollout/green_goal_visible": info.get("green_goal_visible"),
+                "rollout/push_layout_randomized": info.get("push_layout_randomized"),
                 "rollout/collisions": info.get("collisions"),
                 "rollout/safety_overrides": info.get("safety_overrides"),
                 "rollout/action_change": info.get("action_change"),
@@ -572,6 +582,7 @@ def main():
         RoboboSACEnv(
             max_episode_steps=args.max_episode_steps,
             randomize_food_positions=False,
+            randomize_push_layout=args.push_layout_randomization,
             domain_randomization=args.domain_randomization,
             randomization_ranges=randomization_ranges,
             time_penalty_per_second=args.time_penalty_per_second,
@@ -599,6 +610,7 @@ def main():
             "progress_reward",
             "red_block_visible",
             "green_goal_visible",
+            "push_layout_randomized",
             "time_penalty",
             "collision_penalty",
             "action_change_penalty",
@@ -666,6 +678,7 @@ def main():
             "entropy_coefficient": args.entropy_coefficient,
             "max_grad_norm": args.max_grad_norm,
             "curriculum": args.curriculum,
+            "push_layout_randomization": args.push_layout_randomization,
         }
         if manifest.reward_contract != "robobo-push-reward-v1":
             raise ValueError(
@@ -778,6 +791,7 @@ def main():
                 "buffer_size": args.buffer_size,
                 "observation_dim": 18,
                 "task": "push",
+                "push_layout_randomization": args.push_layout_randomization,
                 "domain_randomization": args.domain_randomization,
                 "hardware_calibration": args.hardware_calibration,
                 "time_penalty_per_second": args.time_penalty_per_second,
