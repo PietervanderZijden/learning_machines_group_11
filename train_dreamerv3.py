@@ -49,6 +49,13 @@ def _as_float(value):
     return None
 
 
+def _to_uint8_image(image: np.ndarray) -> np.ndarray:
+    """Scale a float [0, 1] HWC image to uint8 [0, 255] for wandb."""
+    if np.issubdtype(image.dtype, np.floating):
+        image = np.clip(255.0 * image, 0, 255).astype(np.uint8)
+    return image
+
+
 def dreamer_updates_per_env_step(
     replay_ratio: float, batch_size: int, sequence_length: int
 ) -> float:
@@ -961,6 +968,7 @@ def main():
                         writer.add_scalar(f"train/{k}", v, agent.global_step)
                     if wandb_run is not None:
                         payload = {f"train/{k}": float(v) for k, v in losses.items()}
+                        payload["global_step"] = agent.global_step
                         if agent.global_step % args.log_interval == 0:
                             import wandb
                             from learning_machines.distributional import logits_to_value
@@ -969,15 +977,6 @@ def main():
                                     batch["obs"],
                                     batch["action"],
                                     ir_seq=batch.get("ir"),
-                                )
-                            if cfg.use_images or cfg.use_multimodal:
-                                original = batch["obs"][0, 1].detach().cpu()
-                                reconstruction = diagnostic["obs_pred"][0, 0].detach().cpu()
-                                payload["diagnostics/original_frame"] = wandb.Image(
-                                    original.permute(1, 2, 0).numpy()
-                                )
-                                payload["diagnostics/reconstructed_frame"] = wandb.Image(
-                                    reconstruction.permute(1, 2, 0).numpy()
                                 )
                             predicted_reward = logits_to_value(
                                 diagnostic["reward_logits"]
@@ -988,7 +987,37 @@ def main():
                             payload["diagnostics/actual_reward_histogram"] = wandb.Histogram(
                                 batch["reward"].detach().cpu().numpy()
                             )
-                        payload["global_step"] = agent.global_step
+                            if cfg.use_images or cfg.use_multimodal:
+                                original = batch["obs"][0, 1].detach().cpu()
+                                reconstruction = diagnostic["obs_pred"][0, 0].detach().cpu()
+                                C_img, H_img, W_img = original.shape
+                                comparison = torch.zeros(C_img, H_img, W_img * 2)
+                                comparison[:, :, :W_img] = original
+                                comparison[:, :, W_img:] = reconstruction
+                                payload["recon/target"] = wandb.Image(
+                                    _to_uint8_image(original.permute(1, 2, 0).numpy())
+                                )
+                                payload["recon/predicted"] = wandb.Image(
+                                    _to_uint8_image(reconstruction.permute(1, 2, 0).numpy())
+                                )
+                                payload["recon/comparison"] = wandb.Image(
+                                    _to_uint8_image(comparison.permute(1, 2, 0).numpy()),
+                                    caption="left=target  right=prediction",
+                                )
+                                with torch.no_grad():
+                                    video_pred = agent.world_model.video_pred(batch)
+                                target_vid = batch["obs"][0, 1:].detach().cpu()
+                                video_pred_cpu = video_pred[0].detach().cpu()
+                                T, C, H, W = video_pred_cpu.shape
+                                vid_stacked = torch.zeros(T, C, H, W * 2)
+                                vid_stacked[:, :, :, :W] = target_vid
+                                vid_stacked[:, :, :, W:] = video_pred_cpu
+                                vid_stacked = (vid_stacked.permute(0, 2, 3, 1) * 255.0).clamp(0, 255)
+                                payload["recon/open_loop"] = wandb.Video(
+                                    vid_stacked.numpy().astype(np.uint8),
+                                    fps=4, format="gif",
+                                    caption="left=target  right=prediction",
+                                )
                         wandb_run.log(payload)
                     logger.record_train(losses)
 

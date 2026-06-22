@@ -409,3 +409,48 @@ class WorldModel(nn.Module):
             "reward_logits": torch.stack(reward_logits_list, dim=1),
             "continue_logit": torch.stack(continue_list, dim=1),
         }
+
+    def video_pred(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Open-loop video prediction for diagnostics.
+
+        Encodes the first observation to initialise the RSSM state, then
+        rolls out using the recorded actions without any observation
+        updates (pure open-loop / prior sampling mode).
+
+        Args:
+            batch: dict with keys ``obs`` (B, T+1, ...), ``action`` (B, T, dim),
+                   and optionally ``ir`` (B, T+1, dim).
+
+        Returns:
+            (B, T, 3, H, W) tensor of predicted frames in [0, 1].
+        """
+        obs = batch["obs"]
+        action = batch["action"]
+        batch_size, seq_len = action.shape[:2]
+        ir_seq = batch.get("ir")
+        device = obs.device
+
+        obs0 = obs[:, 0]
+        ir0 = ir_seq[:, 0] if ir_seq is not None else None
+
+        if self.use_multimodal:
+            if ir0 is None:
+                ir0 = torch.zeros(batch_size, self.ir_dim, device=device)
+            obs0_embed = self.encode_multimodal(obs0, ir0)
+        elif self.use_images:
+            obs0_embed = self.obs_encoder(obs0)
+        else:
+            obs0_embed = obs0
+
+        zero_action = torch.zeros(batch_size, self.action_dim, device=device)
+        h, z, _, _ = self.rssm.observe(
+            obs0_embed, zero_action, *self.initial_state(batch_size, device),
+        )
+
+        pred_list = []
+        for t in range(seq_len):
+            h, z, _ = self.rssm.imagine(action[:, t], h, z)
+            state = torch.cat([h, z], dim=-1)
+            pred_list.append(self.obs_decoder(state))
+
+        return torch.stack(pred_list, dim=1)
