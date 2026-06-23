@@ -1,0 +1,55 @@
+Task: "JointTrainAgent"
+
+BasicSettings:
+  Seed: 0
+  ImageSize: 64
+  ReplayBufferOnGPU: False
+  n: "gitstorm-robobo-run"
+  env_name: "Robobo"
+  silent: False
+
+Models:
+  WorldModel:
+    InChannels: 3
+    TransformerMaxLength: 100
+    TransformerHiddenDim: 512
+    TransformerNumLayers: 4
+    TransformerNumHeads: 8
+  
+  Agent:
+    NumLayers: 3
+    HiddenDim: 512
+    Gamma: 0.997
+    Lambda: 0.95
+    EntropyCoef: 0.0003
+
+  MaskGit:
+    VocabSize: 1024
+    VocabDim: 256
+    T_revise: 10
+    T_draft: 5
+    M: 10
+    MaskSchedule: "cosine"
+    TmfArgs:
+      EmbedDim: 256
+      NumHeads: 8
+      NumLayers: 4
+      Dropout: 0.1
+      AttentionDropout: 0.1
+      MlpDim: 1024
+
+JointTrainAgent:
+  ModelType: "GITSTORM"
+  SampleMaxSteps: 500000
+  BufferMaxLength: 100000
+  BufferWarmUp: 5000
+  NumEnvs: 1
+  BatchSize: 32
+  BatchLength: 50
+  ImagineBatchSize: 32
+  ImagineContextLength: 15
+  ImagineBatchLength: 15
+  TrainDynamicsEverySteps: 1
+  TrainAgentEverySteps: 1
+  SaveEverySteps: 10000
+  UseDemonstration: False

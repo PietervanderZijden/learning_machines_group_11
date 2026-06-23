@@ -1,6 +1,5 @@
 import gymnasium as gym
 import numpy as np
-import copy
 
 class RoboboGitstormWrapper(gym.Wrapper):
     """
@@ -26,8 +25,10 @@ class RoboboGitstormWrapper(gym.Wrapper):
 
     def decode_action(self, action):
         """Vertaal een integer (0-24) naar [linker_wiel, rechter_wiel]"""
+        # AsyncVectorEnv levert soms een array terug, we pakken de int
         if isinstance(action, (np.ndarray, list)):
             action = int(action[0])
+            
         left_idx = action // 5
         right_idx = action % 5
         return np.array([self.bins[left_idx], self.bins[right_idx]], dtype=np.float32)
@@ -38,10 +39,8 @@ class RoboboGitstormWrapper(gym.Wrapper):
         img = obs_dict["image"].copy()
         ir = obs_dict["ir"]
 
-        if ir.dtype != np.uint8 and np.max(ir) <= 1.0:
-            ir_normalized = (ir * 255).astype(np.uint8)
-        else:
-            ir_normalized = ir.astype(np.uint8)
+        # IR naar 0-255 schalen
+        ir_normalized = (np.clip(ir, 0.0, 1.0) * 255).astype(np.uint8)
 
         channels, height, width = img.shape
         pixels_per_sensor = width // 8
@@ -83,10 +82,10 @@ class RoboboGitstormWrapper(gym.Wrapper):
 
         return obs, reward, terminated, truncated, info
 
+
 def build_robobo_vec_env(env_config, num_envs=1, ranges=None):
     """
-    Dit is de functie die we straks in train.py aanroepen om je 
-    CoppeliaSim robot correct in te pakken voor de GIT-STORM vector omgeving.
+    Vervangt de originele build_vec_env uit GIT-STORM.
     """
     from learning_machines.rl_robobo_compact_env import RoboboCompactEnv
     from learning_machines.domain_randomization import DomainRandomizationWrapper
