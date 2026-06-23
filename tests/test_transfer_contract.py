@@ -494,40 +494,84 @@ def test_push_red_green_blob_detection_uses_separate_masks():
     assert green[0] > 0.5
 
 
-def test_push_reward_progress_success_and_timeout_behavior():
-    env = RoboboCompactEnv(
-        rob=_FakeRobobo(),
-        config=RoboboCompactEnvConfig(
-            task="push",
-            detect_blob_from_camera=False,
-            randomize_food_positions=False,
-            reset_settle_time=0.0,
-            max_episode_steps=1,
-            push_success_distance=0.05,
-        ),
+def _dense_push_env(geometry, **config_overrides):
+    env = RoboboCompactEnv.__new__(RoboboCompactEnv)
+    env.config = RoboboCompactEnvConfig(
+        task="push",
+        push_discount=0.9801,
+        **config_overrides,
     )
-    far = {
-        "red_block": np.array([0.10, 0.5, 0.03, 1.0], dtype=np.float32),
-        "green_goal": np.array([0.40, 0.5, 0.03, 1.0], dtype=np.float32),
+    env._push_layout_randomized = False
+    env._previous_block_goal_distance = env._geometry_block_goal_distance(geometry)
+    env._previous_push_potential = env._push_potential(geometry)
+    env._push_geometry = lambda: geometry
+    return env
+
+
+def _visible_push_obs():
+    return {
+        "red_block": np.array([0.4, 0.5, 0.03, 1.0], dtype=np.float32),
+        "green_goal": np.array([0.6, 0.5, 0.03, 1.0], dtype=np.float32),
     }
-    near = {
-        "red_block": np.array([0.36, 0.5, 0.03, 1.0], dtype=np.float32),
-        "green_goal": np.array([0.40, 0.5, 0.03, 1.0], dtype=np.float32),
-    }
-    env._previous_block_goal_distance = env._block_goal_distance(far)
+
+
+def test_dense_push_reward_values_approach_and_block_progress():
+    start = ((-0.50, 0.0), (0.0, 0.0), (1.0, 0.0))
+    approach = ((-0.30, 0.0), (0.0, 0.0), (1.0, 0.0))
+    push = ((-0.08, 0.0), (0.15, 0.0), (1.0, 0.0))
+
+    approach_env = _dense_push_env(start)
+    approach_env._push_geometry = lambda: approach
+    approach_reward, approach_done, approach_info = approach_env._push_reward(
+        _visible_push_obs(), 0.4, False, 0.0
+    )
+
+    push_env = _dense_push_env(approach)
+    push_env._push_geometry = lambda: push
+    push_reward, push_done, push_info = push_env._push_reward(
+        _visible_push_obs(), 0.4, False, 0.0
+    )
+
+    assert not approach_done
+    assert not push_done
+    assert approach_info["potential_shaping"] > 0.0
+    assert push_info["potential_shaping"] > 0.0
+    assert approach_reward > -1.0
+    assert push_reward > -1.0
+
+
+def test_dense_push_success_terminates_without_explicit_success_bonus():
+    start = ((0.58, 0.0), (0.80, 0.0), (1.0, 0.0))
+    success = ((0.70, 0.0), (0.83, 0.0), (1.0, 0.0))
+    env = _dense_push_env(start, push_success_distance=0.18)
+    env._push_geometry = lambda: success
 
     reward, terminated, info = env._push_reward(
-        near,
-        elapsed_delta_seconds=0.4,
-        collision=False,
-        action_change=0.0,
+        _visible_push_obs(), 0.4, False, 0.0
     )
 
     assert terminated
     assert info["push_success"] == 1.0
-    assert info["block_goal_progress"] > 0.0
-    assert reward > 100.0
-    assert env.max_episode_seconds == 0.4
+    assert "success_reward" not in info
+    assert np.isclose(reward, info["potential_shaping"] - 1.0)
+
+
+def test_dense_push_loop_cannot_outscore_earlier_success():
+    gamma = 0.9801
+    initial_potential = -2.0
+    success_return = -1.0 - initial_potential
+    timeout_steps = 200
+    timeout_return = sum(gamma**step * -1.0 for step in range(timeout_steps))
+    timeout_return += (
+        gamma**timeout_steps * initial_potential - initial_potential
+    )
+
+    assert success_return > timeout_return
+
+
+def test_push_success_takes_precedence_on_final_allowed_step():
+    assert not RoboboCompactEnv._resolve_push_truncation(True, True)
+    assert RoboboCompactEnv._resolve_push_truncation(False, True)
 
 
 def test_push_layout_randomization_moves_block_and_goal_with_constraints():
@@ -682,6 +726,8 @@ def test_sac_recording_metadata_uses_base_env_with_domain_randomization(tmp_path
         no_record=False,
         image_size=16,
     )
+    geometry = ((-0.22, 0.0), (0.0, 0.0), (1.0, 0.0))
+    env._base_env._push_geometry = lambda: geometry
     try:
         env.reset()
         env.step(np.zeros(2, dtype=np.float32))
@@ -693,6 +739,7 @@ def test_sac_recording_metadata_uses_base_env_with_domain_randomization(tmp_path
     episode = np.load(episodes[0])
     assert episode["calibration_profile"].item() == "simulation"
     assert int(episode["phone_tilt"]) == env._base_env.config.phone_tilt
+    assert episode["reward_contract"].item() == "robobo-push-dense-v2"
 
 
 def test_sac_resume_selects_highest_embedded_timestep(tmp_path):

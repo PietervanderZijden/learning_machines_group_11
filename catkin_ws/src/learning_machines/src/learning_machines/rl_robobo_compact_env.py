@@ -67,10 +67,12 @@ class RoboboCompactEnvConfig:
     push_min_block_goal_distance: float = 0.35
     push_max_block_goal_distance: float = 1.20
     push_success_distance: float = 0.18
-    push_success_reward: float = 100.0
-    push_progress_scale: float = 25.0
-    push_time_penalty_per_second: float = 0.1
-    push_action_change_penalty: float = 0.01
+    push_discount: float = 0.997
+    push_block_goal_weight: float = 2.0
+    push_robot_pose_weight: float = 1.0
+    push_standoff_distance: float = 0.22
+    push_time_penalty_per_second: float = 2.5
+    push_action_change_penalty: float = 0.0
     push_red_hsv_low_1: tuple[int, int, int] = (0, 80, 60)
     push_red_hsv_high_1: tuple[int, int, int] = (12, 255, 255)
     push_red_hsv_low_2: tuple[int, int, int] = (168, 80, 60)
@@ -179,6 +181,7 @@ class RoboboCompactEnv(gym.Env):
         self._green_goal_z = 0.005
         self._push_layout_randomized = False
         self._previous_block_goal_distance: float | None = None
+        self._previous_push_potential: float | None = None
         self._blob_track_missed = 0
         self._blob_target_switches = 0
         self._blob_target_confidence = 0.0
@@ -231,7 +234,16 @@ class RoboboCompactEnv(gym.Env):
                 0.0, self.rob.get_sim_time() - observation_sim_start
             )
         if self.config.task == "push":
-            self._previous_block_goal_distance = self._block_goal_distance(obs)
+            geometry = self._push_geometry()
+            if geometry is None:
+                raise RuntimeError(
+                    "push reward requires CoppeliaSim world positions for the "
+                    "robot, red block, and green goal"
+                )
+            self._previous_block_goal_distance = self._geometry_block_goal_distance(
+                geometry
+            )
+            self._previous_push_potential = self._push_potential(geometry)
         self._last_observation_wall_time = time.monotonic()
         info = self._get_info(obs_context)
         if self.config.task == "push":
@@ -315,6 +327,7 @@ class RoboboCompactEnv(gym.Env):
                 collision=bool(info["collision"]),
                 action_change=action_info["action_change"],
             )
+            truncated = self._resolve_push_truncation(terminated, truncated)
             self._collision_count += int(bool(info["collision"]))
             self._safety_override_count += int(action_info["safety_override"] is not None)
             self._action_change_total += action_info["action_change"]
@@ -980,17 +993,76 @@ class RoboboCompactEnv(gym.Env):
         return selected
 
     def _sim_xy_distance(self) -> float | None:
+        geometry = self._push_geometry()
+        if geometry is None:
+            return None
+        return self._geometry_block_goal_distance(geometry)
+
+    def _push_geometry(
+        self,
+    ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None:
         if not self._push_handles_are_valid():
             return None
         try:
             sim = self.rob._sim
+            robot = self.rob.get_position()
             block = sim.getObjectPosition(self._red_block_handle, sim.handle_world)
             goal = sim.getObjectPosition(self._green_goal_handle, sim.handle_world)
-            dx = float(block[0]) - float(goal[0])
-            dy = float(block[1]) - float(goal[1])
-            return math.sqrt(dx * dx + dy * dy)
+            return (
+                (float(robot.x), float(robot.y)),
+                (float(block[0]), float(block[1])),
+                (float(goal[0]), float(goal[1])),
+            )
         except Exception:
             return None
+
+    @staticmethod
+    def _geometry_block_goal_distance(
+        geometry: tuple[
+            tuple[float, float],
+            tuple[float, float],
+            tuple[float, float],
+        ],
+    ) -> float:
+        _robot, block, goal = geometry
+        return math.hypot(block[0] - goal[0], block[1] - goal[1])
+
+    def _push_potential(
+        self,
+        geometry: tuple[
+            tuple[float, float],
+            tuple[float, float],
+            tuple[float, float],
+        ],
+    ) -> float:
+        robot, block, goal = geometry
+        block_goal_distance = self._geometry_block_goal_distance(geometry)
+        if block_goal_distance > 1e-9:
+            goal_direction = (
+                (goal[0] - block[0]) / block_goal_distance,
+                (goal[1] - block[1]) / block_goal_distance,
+            )
+        else:
+            goal_direction = (0.0, 0.0)
+        ideal_push_pose = (
+            block[0] - self.config.push_standoff_distance * goal_direction[0],
+            block[1] - self.config.push_standoff_distance * goal_direction[1],
+        )
+        robot_pose_distance = math.hypot(
+            robot[0] - ideal_push_pose[0],
+            robot[1] - ideal_push_pose[1],
+        )
+        block_term = (
+            self.config.push_block_goal_weight
+            * block_goal_distance
+            / self.config.push_max_block_goal_distance
+        )
+        robot_term = (
+            self.config.push_robot_pose_weight
+            * robot_pose_distance
+            / (2.0 * self.config.push_arena_radius)
+        )
+        return -(block_term + robot_term)
 
     def _camera_block_goal_distance(self, obs: dict) -> float | None:
         red = np.asarray(obs.get("red_block", np.zeros(4)), dtype=np.float32)
@@ -1010,13 +1082,11 @@ class RoboboCompactEnv(gym.Env):
     def _push_success(self, obs: dict, distance: float | None) -> bool:
         if distance is None:
             return False
-        if self._sim_xy_distance() is not None:
-            return distance <= self.config.push_success_distance
-        return (
-            distance <= self.config.push_success_distance
-            and obs["red_block"][3] > 0.5
-            and obs["green_goal"][3] > 0.5
-        )
+        return distance <= self.config.push_success_distance
+
+    @staticmethod
+    def _resolve_push_truncation(terminated: bool, time_limit_reached: bool) -> bool:
+        return bool(time_limit_reached and not terminated)
 
     def _push_observation_info(self, obs: dict, progress: float) -> dict[str, float]:
         distance = self._block_goal_distance(obs)
@@ -1039,32 +1109,59 @@ class RoboboCompactEnv(gym.Env):
         collision: bool,
         action_change: float,
     ) -> tuple[float, bool, dict[str, float]]:
-        distance = self._block_goal_distance(obs)
+        geometry = self._push_geometry()
+        if geometry is None:
+            raise RuntimeError(
+                "push reward lost CoppeliaSim world positions for the robot, "
+                "red block, or green goal"
+            )
+        distance = self._geometry_block_goal_distance(geometry)
         progress = 0.0
         if distance is not None and self._previous_block_goal_distance is not None:
             progress = self._previous_block_goal_distance - distance
-        if distance is not None:
-            self._previous_block_goal_distance = distance
-        red_visible = float(obs["red_block"][3] > 0.5)
-        green_visible = float(obs["green_goal"][3] > 0.5)
+        self._previous_block_goal_distance = distance
         success = self._push_success(obs, distance)
-        success_reward = self.config.push_success_reward if success else 0.0
-        progress_reward = self.config.push_progress_scale * progress
+        potential = self._push_potential(geometry)
+        previous_potential = self._previous_push_potential
+        if previous_potential is None:
+            previous_potential = potential
+        next_potential = 0.0 if success else potential
+        potential_shaping = (
+            self.config.push_discount * next_potential - previous_potential
+        )
+        self._previous_push_potential = potential
         time_cost = max(0.0, elapsed_delta_seconds) * self.config.push_time_penalty_per_second
         collision_cost = self.config.collision_penalty if collision else 0.0
         action_change_cost = self.config.push_action_change_penalty * max(0.0, action_change)
         reward = (
-            success_reward
-            + progress_reward
+            potential_shaping
             - time_cost
             - collision_cost
             - action_change_cost
         )
+        robot, block, goal = geometry
+        block_goal_distance = self._geometry_block_goal_distance(geometry)
+        if block_goal_distance > 1e-9:
+            goal_direction = (
+                (goal[0] - block[0]) / block_goal_distance,
+                (goal[1] - block[1]) / block_goal_distance,
+            )
+        else:
+            goal_direction = (0.0, 0.0)
+        ideal_push_pose = (
+            block[0] - self.config.push_standoff_distance * goal_direction[0],
+            block[1] - self.config.push_standoff_distance * goal_direction[1],
+        )
+        robot_pose_distance = math.hypot(
+            robot[0] - ideal_push_pose[0],
+            robot[1] - ideal_push_pose[1],
+        )
         info = self._push_observation_info(obs, progress=progress)
         info.update({
-            "success_reward": float(success_reward),
-            "progress_reward": float(progress_reward),
-            "time_penalty": float(time_cost),
+            "push_potential": float(potential),
+            "potential_shaping": float(potential_shaping),
+            "robot_push_pose_distance": float(robot_pose_distance),
+            "time_cost": float(time_cost),
             "collision_penalty": float(collision_cost),
             "action_change_penalty": float(action_change_cost),
         })

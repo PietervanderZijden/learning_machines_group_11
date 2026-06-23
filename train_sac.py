@@ -26,6 +26,12 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+SAC_GAMMA = 0.9801
+PUSH_REWARD_CONTRACT = "robobo-push-dense-v2"
+PUSH_BLOCK_GOAL_WEIGHT = 2.0
+PUSH_ROBOT_POSE_WEIGHT = 1.0
+PUSH_STANDOFF_DISTANCE = 0.22
+
 
 def _save_episode_atomic(path: Path, data: dict[str, np.ndarray]) -> None:
     """Write a complete episode without exposing a partial NPZ file."""
@@ -101,7 +107,7 @@ class RoboboSACEnv(gym.Env):
     def __init__(
         self,
         rob=None,
-        max_episode_steps=150,
+        max_episode_steps=200,
         randomize_food_positions=False,
         randomize_push_layout=True,
         domain_randomization=False,
@@ -111,12 +117,11 @@ class RoboboSACEnv(gym.Env):
         pose_jitter=0.02,
         wheel_noise_std=0.03,
         wheel_noise_prob=0.3,
-        time_penalty_per_second=0.5,
+        time_penalty_per_second=2.5,
         collision_penalty=0.0,
-        action_change_penalty=0.02,
+        action_change_penalty=0.0,
         reward_scale=0.01,
-        shaping_scale=5.0,
-        emergency_override_penalty=1.0,
+        emergency_override_penalty=0.0,
         calibration_path=None,
         curriculum=True,
         curriculum_one_food_steps=100_000,
@@ -142,6 +147,10 @@ class RoboboSACEnv(gym.Env):
             collision_penalty=collision_penalty,
             action_change_penalty=action_change_penalty,
             push_action_change_penalty=action_change_penalty,
+            push_discount=SAC_GAMMA,
+            push_block_goal_weight=PUSH_BLOCK_GOAL_WEIGHT,
+            push_robot_pose_weight=PUSH_ROBOT_POSE_WEIGHT,
+            push_standoff_distance=PUSH_STANDOFF_DISTANCE,
             calibration_path=calibration_path,
             return_image=not no_record,
             image_obs_size=(image_size, image_size),
@@ -217,7 +226,7 @@ class RoboboSACEnv(gym.Env):
             "rewards": np.array(self._episode_rewards, dtype=np.float32),
             "dones": np.array(self._episode_dones, dtype=bool),
             "observation_contract": np.array("robobo-push-obs-v1"),
-            "reward_contract": np.array("robobo-push-reward-v1"),
+            "reward_contract": np.array(PUSH_REWARD_CONTRACT),
             "control_interval_seconds": np.array(0.4),
             "calibration_profile": np.array(
                 self._base_env.observation_adapter.profile.name
@@ -255,10 +264,11 @@ class RoboboSACEnv(gym.Env):
         info = dict(info)
         info["raw_reward"] = float(raw_reward)
         info["push_success"] = push_success
-        info.setdefault("success_reward", 0.0)
-        info.setdefault("progress_reward", 0.0)
+        info.setdefault("push_potential", 0.0)
+        info.setdefault("potential_shaping", 0.0)
+        info.setdefault("robot_push_pose_distance", float("nan"))
         info.setdefault(
-            "time_penalty",
+            "time_cost",
             self._config.time_penalty_per_second * self._config.step_millis / 1000.0,
         )
         info.setdefault("collision_penalty", 0.0)
@@ -267,7 +277,6 @@ class RoboboSACEnv(gym.Env):
             if info.get("safety_override") == "emergency_reverse_turn"
             else 0.0
         )
-        shaping_reward = 0.0
         unscaled_training_reward = float(raw_reward) - emergency_cost
         training_reward = self.reward_scale * unscaled_training_reward
         if self._record:
@@ -279,7 +288,6 @@ class RoboboSACEnv(gym.Env):
                 self._episode_irs.append(obs_dict["ir"].astype(np.float32).copy())
             if terminated or truncated:
                 self._save_episode()
-        info["shaping_reward"] = shaping_reward
         info["safety_override_penalty"] = emergency_cost
         info["unscaled_training_reward"] = unscaled_training_reward
         info["training_reward"] = training_reward
@@ -298,7 +306,7 @@ def main():
         "--host",
         default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
     )
-    parser.add_argument("--max-episode-steps", type=int, default=150)
+    parser.add_argument("--max-episode-steps", type=int, default=200)
     parser.add_argument(
         "--push-layout-randomization",
         action=argparse.BooleanOptionalAction,
@@ -319,15 +327,14 @@ def main():
     parser.add_argument(
         "--time-penalty-per-second",
         type=float,
-        default=0.5,
-        help="Elapsed-time penalty; 0.5/s equals 0.2 per 400 ms transition",
+        default=2.5,
+        help="Elapsed-time cost; 2.5/s equals 1.0 per 400 ms transition",
     )
     parser.add_argument("--collision-penalty", type=float, default=0.0,
                         help="Additional dense reward penalty when front IR indicates collision")
-    parser.add_argument("--action-change-penalty", type=float, default=0.02)
+    parser.add_argument("--action-change-penalty", type=float, default=0.0)
     parser.add_argument("--reward-scale", type=float, default=0.01)
-    parser.add_argument("--shaping-scale", type=float, default=5.0)
-    parser.add_argument("--emergency-override-penalty", type=float, default=1.0)
+    parser.add_argument("--emergency-override-penalty", type=float, default=0.0)
     parser.add_argument("--entropy-coefficient", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--calibration", default="config/calibration/simulation.json")
@@ -423,7 +430,7 @@ def main():
             print(f"New wandb run: {wandb_run.id}")
         wandb_run.config.update({
             "observation_contract": "robobo-push-obs-v1",
-            "reward_contract": "robobo-push-reward-v1",
+            "reward_contract": PUSH_REWARD_CONTRACT,
             "control_interval_seconds": 0.4,
             "phone_tilt": 100,
             "task": "push",
@@ -510,12 +517,14 @@ def main():
                 "rollout/safety_overrides": info.get("safety_overrides"),
                 "rollout/action_change": info.get("action_change"),
                 "rollout/action_saturation": info.get("action_saturation"),
-                "rollout/success_reward": info.get("success_reward"),
-                "rollout/progress_reward": info.get("progress_reward"),
-                "rollout/time_penalty": info.get("time_penalty"),
+                "rollout/push_potential": info.get("push_potential"),
+                "rollout/potential_shaping": info.get("potential_shaping"),
+                "rollout/robot_push_pose_distance": info.get(
+                    "robot_push_pose_distance"
+                ),
+                "rollout/time_cost": info.get("time_cost"),
                 "rollout/collision_penalty": info.get("collision_penalty"),
                 "rollout/action_change_penalty": info.get("action_change_penalty"),
-                "rollout/shaping_reward": info.get("shaping_reward"),
                 "rollout/safety_override_penalty": info.get("safety_override_penalty"),
                 "rollout/unscaled_training_reward": info.get("unscaled_training_reward"),
                 "rollout/training_reward": info.get("training_reward"),
@@ -589,7 +598,6 @@ def main():
             collision_penalty=args.collision_penalty,
             action_change_penalty=args.action_change_penalty,
             reward_scale=args.reward_scale,
-            shaping_scale=args.shaping_scale,
             emergency_override_penalty=args.emergency_override_penalty,
             calibration_path=args.calibration,
             curriculum=args.curriculum,
@@ -606,15 +614,15 @@ def main():
             "push_success",
             "block_goal_distance",
             "block_goal_progress",
-            "success_reward",
-            "progress_reward",
+            "push_potential",
+            "potential_shaping",
+            "robot_push_pose_distance",
             "red_block_visible",
             "green_goal_visible",
             "push_layout_randomized",
-            "time_penalty",
+            "time_cost",
             "collision_penalty",
             "action_change_penalty",
-            "shaping_reward",
             "safety_override_penalty",
             "unscaled_training_reward",
             "training_reward",
@@ -657,7 +665,7 @@ def main():
             ),
             "reward_contract": (
                 manifest.reward_contract,
-                "robobo-push-reward-v1",
+                PUSH_REWARD_CONTRACT,
             ),
         }
         manifest_mismatches = {
@@ -673,17 +681,21 @@ def main():
             "observation_dim": 18,
             "task": "push",
             "reward_scale": args.reward_scale,
-            "shaping_scale": args.shaping_scale,
             "emergency_override_penalty": args.emergency_override_penalty,
             "entropy_coefficient": args.entropy_coefficient,
             "max_grad_norm": args.max_grad_norm,
             "curriculum": args.curriculum,
             "push_layout_randomization": args.push_layout_randomization,
+            "max_episode_steps": args.max_episode_steps,
+            "gamma": SAC_GAMMA,
+            "push_block_goal_weight": PUSH_BLOCK_GOAL_WEIGHT,
+            "push_robot_pose_weight": PUSH_ROBOT_POSE_WEIGHT,
+            "push_standoff_distance": PUSH_STANDOFF_DISTANCE,
         }
-        if manifest.reward_contract != "robobo-push-reward-v1":
+        if manifest.reward_contract != PUSH_REWARD_CONTRACT:
             raise ValueError(
                 f"checkpoint reward contract is {manifest.reward_contract}, "
-                "expected robobo-push-reward-v1; start a fresh run"
+                f"expected {PUSH_REWARD_CONTRACT}; start a fresh run"
             )
         mismatches = {
             key: (manifest.algorithm_config.get(key), expected)
@@ -719,7 +731,7 @@ def main():
             learning_starts=args.learning_starts,
             batch_size=args.batch_size,
             tau=0.005,
-            gamma=0.9801,
+            gamma=SAC_GAMMA,
             train_freq=(1, "step"),
             gradient_steps=1,
             ent_coef=args.entropy_coefficient,
@@ -784,7 +796,7 @@ def main():
             calibration_profile=calibration_name,
             image_size=64,
             observation_contract="robobo-push-obs-v1",
-            reward_contract="robobo-push-reward-v1",
+            reward_contract=PUSH_REWARD_CONTRACT,
             algorithm_config={
                 "learning_rate": args.learning_rate,
                 "batch_size": args.batch_size,
@@ -798,11 +810,14 @@ def main():
                 "collision_penalty": args.collision_penalty,
                 "action_change_penalty": args.action_change_penalty,
                 "reward_scale": args.reward_scale,
-                "shaping_scale": args.shaping_scale,
                 "emergency_override_penalty": args.emergency_override_penalty,
                 "entropy_coefficient": args.entropy_coefficient,
                 "max_grad_norm": args.max_grad_norm,
-                "gamma": 0.9801,
+                "gamma": SAC_GAMMA,
+                "max_episode_steps": args.max_episode_steps,
+                "push_block_goal_weight": PUSH_BLOCK_GOAL_WEIGHT,
+                "push_robot_pose_weight": PUSH_ROBOT_POSE_WEIGHT,
+                "push_standoff_distance": PUSH_STANDOFF_DISTANCE,
                 "curriculum": args.curriculum,
                 "curriculum_one_food_steps": args.curriculum_one_food_steps,
                 "curriculum_three_food_steps": args.curriculum_three_food_steps,
