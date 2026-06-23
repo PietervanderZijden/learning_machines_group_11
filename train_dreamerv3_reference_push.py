@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import collections
 import contextlib
 import functools
@@ -10,7 +11,6 @@ import json
 import os
 import pathlib
 import sys
-import time
 
 import numpy as np
 import torch
@@ -55,6 +55,7 @@ sys.path.insert(
 from rl_robobo_compact_env import RoboboCompactEnv, RoboboCompactEnvConfig
 from robobo_env_wrapper import RoboboNM512Wrapper
 from domain_randomization import DomainRandomizationWrapper, RandomizationRanges
+from learning_machines.reference_wandb_media import WandbLogger
 
 import dreamer
 from envs import wrappers
@@ -63,91 +64,6 @@ from parallel import Damy
 
 
 PUSH_REWARD_CONTRACT = "robobo-push-dense-v2"
-
-
-class WandbLogger:
-    """Drop-in replacement for tools.Logger that logs to W&B with sections."""
-
-    ENV_KEYS = {
-        "train_return", "train_length", "train_episodes",
-        "eval_return", "eval_length", "eval_episodes", "dataset_size",
-    }
-
-    def __init__(self, step):
-        self.step = step
-        self._last_step = None
-        self._last_time = None
-        self._scalars = {}
-        self._images = {}
-        self._videos = {}
-        self._section_cache = {}
-
-    def _section(self, name):
-        if name in self._section_cache:
-            return self._section_cache[name]
-        if name.startswith("recon/"):
-            sectioned = name
-        elif name in self.ENV_KEYS:
-            sectioned = f"env/{name}"
-        elif name.startswith("log_"):
-            sectioned = f"env/{name}"
-        elif name.startswith("expl_"):
-            sectioned = f"model/{name}"
-        else:
-            sectioned = f"model/{name}"
-        self._section_cache[name] = sectioned
-        return sectioned
-
-    def scalar(self, name, value):
-        self._scalars[name] = float(value)
-
-    def image(self, name, value):
-        self._images[name] = np.array(value)
-
-    def video(self, name, value):
-        self._videos[name] = np.array(value)
-
-    def write(self, fps=False, step=False):
-        if not step:
-            step = self.step
-        log = {}
-        for name, value in self._scalars.items():
-            log[self._section(name)] = value
-        if fps:
-            log["perf/fps"] = self._compute_fps(step)
-        for name, value in self._images.items():
-            if np.issubdtype(value.dtype, np.floating):
-                value = np.clip(255 * value, 0, 255).astype(np.uint8)
-            if value.ndim == 3:
-                value = value.transpose(1, 2, 0)
-            log[name] = wandb.Image(value)
-        for name, value in self._videos.items():
-            name = name if isinstance(name, str) else name.decode("utf-8")
-            if np.issubdtype(value.dtype, np.floating):
-                value = np.clip(255 * value, 0, 255).astype(np.uint8)
-            if value.ndim != 5:
-                continue
-            frames = value[0]
-            dim1, dim4 = frames.shape[1], frames.shape[-1]
-            if dim1 in (1, 3) and dim4 not in (1, 3):
-                frames = frames.transpose(0, 2, 3, 1)
-            log[f"video/{name}"] = wandb.Video(frames, fps=16, format="gif")
-        if log:
-            wandb.log(log, step=step)
-        self._scalars = {}
-        self._images = {}
-        self._videos = {}
-
-    def _compute_fps(self, step):
-        if self._last_step is None:
-            self._last_time = time.time()
-            self._last_step = step
-            return 0
-        steps = step - self._last_step
-        duration = time.time() - self._last_time
-        self._last_time += duration
-        self._last_step = step
-        return steps / duration
 
 
 class EpisodeStats:
@@ -373,7 +289,6 @@ def main():
     tools.set_seed_everywhere(config.seed)
 
     step = dreamer.count_steps(pathlib.Path(config.traindir))
-    logger = WandbLogger(config.action_repeat * step)
 
     if not cli.no_wandb:
         wandb_init_kwargs = dict(
@@ -387,6 +302,11 @@ def main():
         )
         wandb_init_kwargs["resume"] = "allow"
         wandb.init(**wandb_init_kwargs)
+    logger = WandbLogger(
+        config.action_repeat * step,
+        enabled=not cli.no_wandb,
+    )
+    atexit.register(logger.close)
 
     print(f"Starting NM512 DreamerV3 push training on Robobo")
     print(f"  Log dir: {logdir}")
@@ -507,6 +427,7 @@ def main():
             try:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
+                logger.write(step=logger.step)
             except StopIteration:
                 pass
 
@@ -567,8 +488,8 @@ def main():
         except Exception:
             pass
 
-    if not cli.no_wandb:
-        wandb.finish()
+    logger.close()
+    atexit.unregister(logger.close)
     tqdm.write("Training complete.")
 
 
