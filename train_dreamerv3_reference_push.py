@@ -6,6 +6,7 @@ import argparse
 import collections
 import contextlib
 import functools
+import json
 import os
 import pathlib
 import sys
@@ -61,7 +62,7 @@ import tools
 from parallel import Damy
 
 
-PUSH_SUCCESS_REWARD = 100.0
+PUSH_REWARD_CONTRACT = "robobo-push-dense-v2"
 
 
 class WandbLogger:
@@ -182,6 +183,12 @@ def make_robobo_env(config, mode):
         return_image=True,
         image_obs_size=tuple(config.size),
         randomize_push_layout=True,
+        push_discount=config.discount,
+        push_block_goal_weight=2.0,
+        push_robot_pose_weight=1.0,
+        push_standoff_distance=0.22,
+        push_time_penalty_per_second=2.5,
+        push_action_change_penalty=0.0,
     )
     from robobo_interface import SimulationRobobo
     rob = SimulationRobobo()
@@ -226,7 +233,7 @@ def main():
     cfg["size"] = [64, 64]
     cfg["envs"] = 1
     cfg["action_repeat"] = 1
-    cfg["time_limit"] = 150
+    cfg["time_limit"] = 200
     cfg["grayscale"] = False
     cfg["prefill"] = 5000
     cfg["model_lr"] = 4e-5
@@ -311,7 +318,7 @@ def main():
         "--port", type=int,
         default=int(os.environ.get("COPPELIA_SIM_PORT", "23000")),
     )
-    parser.add_argument("--time-limit", type=int, default=150)
+    parser.add_argument("--time-limit", type=int, default=200)
     cli = parser.parse_args()
 
     os.environ["COPPELIA_SIM_IP"] = cli.host
@@ -338,6 +345,29 @@ def main():
     config.traindir = str(logdir / "train_eps")
     config.evaldir = str(logdir / "eval_eps")
     os.makedirs(config.traindir, exist_ok=True)
+    contract_path = logdir / "reward_contract.json"
+    existing_episode_files = list(pathlib.Path(config.traindir).glob("*.npz"))
+    expected_contract = {
+        "reward_contract": PUSH_REWARD_CONTRACT,
+        "max_episode_steps": config.time_limit,
+        "discount": config.discount,
+    }
+    if contract_path.exists():
+        contract = json.loads(contract_path.read_text())
+        if contract != expected_contract:
+            raise ValueError(
+                f"incompatible reference replay reward contract: {contract}; "
+                "use a fresh --logdir"
+            )
+    elif existing_episode_files:
+        raise ValueError(
+            "reference replay has no dense-v2 reward contract; use a fresh --logdir"
+        )
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    contract_path.write_text(
+        json.dumps(expected_contract, indent=2)
+        + "\n"
+    )
     os.makedirs(config.evaldir, exist_ok=True)
 
     tools.set_seed_everywhere(config.seed)
@@ -508,7 +538,7 @@ def main():
             ep_reward = float(np.array(ep_data["reward"]).sum())
             block_rewards.append(ep_reward)
             block_successes.append(
-                1.0 if ep_reward >= PUSH_SUCCESS_REWARD * 0.9 else 0.0
+                float(np.asarray(ep_data["is_terminal"], dtype=bool).any())
             )
         if block_rewards:
             recent_reward = block_rewards[-1]

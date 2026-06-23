@@ -75,7 +75,7 @@ class DreamerV3Config:
     grad_clip: float = 100.0
 
     # Environment
-    max_episode_steps: int = 150
+    max_episode_steps: int = 200
     num_envs: int = 1
     use_images: bool = False
     use_multimodal: bool = True  # Use images + IR data

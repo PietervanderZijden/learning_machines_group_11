@@ -24,6 +24,11 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
+PUSH_REWARD_CONTRACT = "robobo-push-dense-v2"
+PUSH_BLOCK_GOAL_WEIGHT = 2.0
+PUSH_ROBOT_POSE_WEIGHT = 1.0
+PUSH_STANDOFF_DISTANCE = 0.22
+
 
 class _NullSummaryWriter:
     def add_scalar(self, *args, **kwargs):
@@ -268,7 +273,7 @@ def main():
         "--host",
         default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
     )
-    parser.add_argument("--max-episode-steps", type=int, default=150)
+    parser.add_argument("--max-episode-steps", type=int, default=200)
     parser.add_argument(
         "--push-layout-randomization",
         action=argparse.BooleanOptionalAction,
@@ -342,13 +347,13 @@ def main():
     parser.add_argument(
         "--time-penalty-per-second",
         type=float,
-        default=0.1,
-        help="Push-task elapsed-time penalty.",
+        default=2.5,
+        help="Elapsed-time cost; 2.5/s equals 1.0 per 400 ms transition.",
     )
     parser.add_argument(
         "--action-change-penalty",
         type=float,
-        default=0.01,
+        default=0.0,
         help="Push-task penalty for large action changes.",
     )
     parser.add_argument(
@@ -495,7 +500,7 @@ def main():
     if wandb_run is not None:
         wandb_run.config.update({
             "observation_contract": "robobo-push-obs-v1",
-            "reward_contract": "robobo-push-reward-v1",
+            "reward_contract": PUSH_REWARD_CONTRACT,
             "control_interval_seconds": 0.4,
             "phone_tilt": 100,
             "task": "push",
@@ -522,6 +527,10 @@ def main():
         push_time_penalty_per_second=args.time_penalty_per_second,
         action_change_penalty=args.action_change_penalty,
         push_action_change_penalty=args.action_change_penalty,
+        push_discount=cfg.gamma,
+        push_block_goal_weight=PUSH_BLOCK_GOAL_WEIGHT,
+        push_robot_pose_weight=PUSH_ROBOT_POSE_WEIGHT,
+        push_standoff_distance=PUSH_STANDOFF_DISTANCE,
     )
     rob_env = RoboboCompactEnv(config=env_config)
     randomization_ranges = None
@@ -603,11 +612,28 @@ def main():
             ),
             "reward_contract": (
                 manifest.reward_contract,
-                "robobo-push-reward-v1",
+                PUSH_REWARD_CONTRACT,
             ),
             "push_layout_randomization": (
                 manifest.algorithm_config.get("push_layout_randomization"),
                 args.push_layout_randomization,
+            ),
+            "max_episode_steps": (
+                manifest.algorithm_config.get("max_episode_steps"),
+                args.max_episode_steps,
+            ),
+            "gamma": (manifest.algorithm_config.get("gamma"), cfg.gamma),
+            "push_block_goal_weight": (
+                manifest.algorithm_config.get("push_block_goal_weight"),
+                PUSH_BLOCK_GOAL_WEIGHT,
+            ),
+            "push_robot_pose_weight": (
+                manifest.algorithm_config.get("push_robot_pose_weight"),
+                PUSH_ROBOT_POSE_WEIGHT,
+            ),
+            "push_standoff_distance": (
+                manifest.algorithm_config.get("push_standoff_distance"),
+                PUSH_STANDOFF_DISTANCE,
             ),
         }
         manifest_mismatches = {
@@ -667,12 +693,14 @@ def main():
             if cfg.use_multimodal and ir_obs is not None:
                 agent.buffer.add(
                     obs, executed_action, reward, done, ir=ir_obs,
+                    terminal=terminated,
                     next_obs=next_obs if done else None,
                     next_ir=next_ir if done else None,
                 )
             else:
                 agent.buffer.add(
                     obs, executed_action, reward, done,
+                    terminal=terminated,
                     next_obs=next_obs if done else None,
                 )
             obs = next_obs
@@ -722,6 +750,7 @@ def main():
     episode_actions = []
     episode_rewards = []
     episode_dones = []
+    episode_terminals = []
     episode_irs = []
     episode_count = next_episode_id
     episode_collisions = 0
@@ -780,17 +809,20 @@ def main():
             if not args.no_record:
                 episode_rewards.append(reward)
                 episode_dones.append(done)
+                episode_terminals.append(terminated)
 
             # Add to buffer (handle multi-modal)
             if cfg.use_multimodal and ir_obs is not None:
                 agent.buffer.add(
                     obs, executed_action, reward, done, ir=ir_obs,
+                    terminal=terminated,
                     next_obs=next_obs if done else None,
                     next_ir=next_ir if done else None,
                 )
             else:
                 agent.buffer.add(
                     obs, executed_action, reward, done,
+                    terminal=terminated,
                     next_obs=next_obs if done else None,
                 )
             obs = next_obs
@@ -838,6 +870,11 @@ def main():
                     "episode/push_success": success,
                     "episode/block_goal_distance": float(info.get("block_goal_distance", np.nan)),
                     "episode/block_goal_progress": float(info.get("block_goal_progress", 0.0)),
+                    "episode/push_potential": float(info.get("push_potential", np.nan)),
+                    "episode/potential_shaping": float(info.get("potential_shaping", 0.0)),
+                    "episode/robot_push_pose_distance": float(
+                        info.get("robot_push_pose_distance", np.nan)
+                    ),
                     "episode/red_block_visible": float(info.get("red_block_visible", 0.0)),
                     "episode/green_goal_visible": float(info.get("green_goal_visible", 0.0)),
                     "episode/push_layout_randomized": float(info.get("push_layout_randomized", 0.0)),
@@ -899,8 +936,9 @@ def main():
                         "actions": np.array(episode_actions, dtype=np.float32),
                         "rewards": np.array(episode_rewards, dtype=np.float32),
                         "dones": np.array(episode_dones, dtype=bool),
+                        "terminals": np.array(episode_terminals, dtype=bool),
                         "observation_contract": np.array("robobo-push-obs-v1"),
-                        "reward_contract": np.array("robobo-push-reward-v1"),
+                        "reward_contract": np.array(PUSH_REWARD_CONTRACT),
                         "control_interval_seconds": np.array(0.4),
                         "calibration_profile": np.array(
                             env.unwrapped.observation_adapter.profile.name
@@ -919,6 +957,7 @@ def main():
                 episode_actions.clear()
                 episode_rewards.clear()
                 episode_dones.clear()
+                episode_terminals.clear()
                 episode_irs.clear()
                 episode_reward = 0
                 episode_length = 0
@@ -1051,7 +1090,7 @@ def main():
             calibration_profile=calibration_name,
             image_size=args.image_size,
             observation_contract="robobo-push-obs-v1",
-            reward_contract="robobo-push-reward-v1",
+            reward_contract=PUSH_REWARD_CONTRACT,
             algorithm_config={
                 "world_lr": cfg.world_lr,
                 "actor_lr": cfg.actor_lr,
@@ -1068,6 +1107,10 @@ def main():
                 "sequence_length": cfg.sequence_length,
                 "imagination_horizon": cfg.imagination_horizon,
                 "gamma": cfg.gamma,
+                "max_episode_steps": args.max_episode_steps,
+                "push_block_goal_weight": PUSH_BLOCK_GOAL_WEIGHT,
+                "push_robot_pose_weight": PUSH_ROBOT_POSE_WEIGHT,
+                "push_standoff_distance": PUSH_STANDOFF_DISTANCE,
                 "reward_event_fraction": cfg.reward_event_fraction,
                 "reward_event_threshold": cfg.reward_event_threshold,
                 "train_ratio": args.train_ratio,

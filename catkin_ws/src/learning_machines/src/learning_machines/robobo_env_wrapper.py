@@ -77,6 +77,12 @@ class RoboboNM512Wrapper(gym.Env):
     def step(self, action):
         obs, reward, terminated, truncated, info = self._env.step(action)
         done = terminated or truncated
+        info = dict(info)
+        if done:
+            info.setdefault(
+                "discount",
+                np.array(0.0 if terminated else 1.0, dtype=np.float32),
+            )
         self._is_first = False
         self._episode_step += 1
         converted = self._convert_obs(obs)

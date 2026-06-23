@@ -75,10 +75,11 @@ class ReplayBuffer:
                         "images" in data
                         and "rewards" in data
                         and "dones" in data
+                        and "terminals" in data
                         and data.get("observation_contract", np.array("")).item()
                         == "robobo-push-obs-v1"
                         and data.get("reward_contract", np.array("")).item()
-                        == "robobo-push-reward-v1"
+                        == "robobo-push-dense-v2"
                         and np.isclose(
                             data.get(
                                 "control_interval_seconds", np.array(-1.0)
@@ -108,7 +109,7 @@ class ReplayBuffer:
                     images,
                     data["actions"].astype(np.float32),
                     data["rewards"].astype(np.float32),
-                    data["dones"].astype(np.float32),
+                    data["terminals"].astype(np.float32),
                     ir=ir,
                 )
                 restored += len(data["actions"])
@@ -124,6 +125,7 @@ class ReplayBuffer:
         action: np.ndarray,
         reward: float,
         done: bool,
+        terminal: bool | None = None,
         ir: np.ndarray | None = None,
         next_obs: np.ndarray | None = None,
         next_ir: np.ndarray | None = None,
@@ -136,13 +138,16 @@ class ReplayBuffer:
             obs: observation (obs_dim,) or (C, H, W) for images
             action: action (action_dim,)
             reward: scalar reward
-            done: episode done flag
+            done: episode-boundary flag (success or time limit)
+            terminal: true task terminal; false for time-limit truncation
             ir: optional IR data (ir_dim,) for multi-modal
         """
         self._current_episode["obs"].append(obs)
         self._current_episode["action"].append(action)
         self._current_episode["reward"].append(reward)
-        self._current_episode["done"].append(float(done))
+        self._current_episode["done"].append(
+            float(done if terminal is None else terminal)
+        )
 
         if self.ir_dim > 0 and ir is not None:
             self._current_episode["ir"].append(ir)
@@ -220,7 +225,7 @@ class ReplayBuffer:
             obs: (T+1, obs_dim) or (T+1, C, H, W)
             action: (T, action_dim)
             reward: (T,)
-            done: (T,)
+            done: (T,) true terminal flags; time limits remain false
             ir: (T+1, ir_dim) optional
         """
         if len(obs) != len(action) + 1:

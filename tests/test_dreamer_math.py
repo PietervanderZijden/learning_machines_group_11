@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import gymnasium as gym
 
 from learning_machines.dreamerv3.actor_critic import Actor, lambda_return
 from learning_machines.dreamerv3.layers import RMSNorm
@@ -19,6 +20,7 @@ from learning_machines.dreamerv3.dreamerv3 import (
     _cpu_byte_rng_states,
     select_imagination_starts,
 )
+from learning_machines.robobo_env_wrapper import RoboboNM512Wrapper
 
 
 def test_cuda_rng_states_are_normalized_to_cpu_byte_tensors():
@@ -182,6 +184,49 @@ def test_v3_replay_preserves_terminal_next_observation():
     torch.testing.assert_close(batch["obs"][0, -1], torch.tensor([2.0, 2.0, 2.0]))
 
 
+def test_v3_replay_bootstraps_time_limit_boundaries():
+    buffer = ReplayBuffer(3, 2, capacity=20, sequence_length=2)
+    buffer.add(np.array([0, 0, 0]), np.array([0, 0]), -1.0, False)
+    buffer.add(
+        np.array([1, 1, 1]),
+        np.array([1, 1]),
+        -1.0,
+        True,
+        terminal=False,
+        next_obs=np.array([2, 2, 2]),
+    )
+
+    assert buffer._episodes[0]["done"][-1] == 0.0
+    batch = buffer.sample(1, torch.device("cpu"))
+    assert batch["discount"][0, -1] == 1.0
+
+
+def test_reference_wrapper_distinguishes_timeout_from_terminal_discount():
+    class FakeEnv(gym.Env):
+        action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+
+        def __init__(self, terminated, truncated):
+            self.terminated = terminated
+            self.truncated = truncated
+
+        def step(self, action):
+            obs = {
+                "image": np.zeros((3, 64, 64), dtype=np.uint8),
+                "ir": np.zeros(8, dtype=np.float32),
+            }
+            return obs, -1.0, self.terminated, self.truncated, {}
+
+    timeout = RoboboNM512Wrapper(FakeEnv(False, True))
+    timeout_obs, _, timeout_done, timeout_info = timeout.step(np.zeros(2))
+    terminal = RoboboNM512Wrapper(FakeEnv(True, False))
+    terminal_obs, _, terminal_done, terminal_info = terminal.step(np.zeros(2))
+
+    assert timeout_done and not timeout_obs["is_terminal"]
+    assert timeout_info["discount"] == 1.0
+    assert terminal_done and terminal_obs["is_terminal"]
+    assert terminal_info["discount"] == 0.0
+
+
 def test_v3_replay_balances_sparse_reward_event_sequences():
     np.random.seed(4)
     buffer = ReplayBuffer(
@@ -215,8 +260,9 @@ def test_v3_replay_restores_recent_aligned_recordings(tmp_path):
             actions=np.zeros((3, 2), dtype=np.float32),
             rewards=np.zeros(3, dtype=np.float32),
             dones=np.array([False, False, True]),
+            terminals=np.array([False, False, index == 2]),
             observation_contract=np.array("robobo-push-obs-v1"),
-            reward_contract=np.array("robobo-push-reward-v1"),
+            reward_contract=np.array("robobo-push-dense-v2"),
             control_interval_seconds=np.array(0.4),
         )
     buffer = ReplayBuffer(
