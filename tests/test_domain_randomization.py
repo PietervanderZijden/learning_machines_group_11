@@ -45,6 +45,16 @@ class TestRandomizationRanges:
         assert hasattr(r, 'ir_gain')
         assert hasattr(r, 'camera_contrast')
 
+    def test_dreamer_disables_exposure_jitter_and_reduces_image_noise(self):
+        from learning_machines.domain_randomization import RandomizationRanges
+        from train_dreamerv3 import configure_dreamer_randomization
+
+        configured = configure_dreamer_randomization(RandomizationRanges())
+
+        assert configured.camera_exposure == (0.0, 0.0)
+        assert configured.image_noise_std == pytest.approx(0.005)
+        assert configured.camera_contrast == RandomizationRanges().camera_contrast
+
 
 class TestDomainRandomizationWrapper:
     def test_wrapper_creation(self):

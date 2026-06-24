@@ -19,12 +19,24 @@ import os
 import sys
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
 
 PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
+DREAMER_CAMERA_EXPOSURE_RANGE = (0.0, 0.0)
+DREAMER_IMAGE_NOISE_STD = 0.005
+
+
+def configure_dreamer_randomization(ranges):
+    """Apply Dreamer-specific visual randomization limits."""
+    return replace(
+        ranges,
+        camera_exposure=DREAMER_CAMERA_EXPOSURE_RANGE,
+        image_noise_std=DREAMER_IMAGE_NOISE_STD,
+    )
 
 
 class _NullSummaryWriter:
@@ -549,16 +561,17 @@ def main():
         push_discount=cfg.gamma,
     )
     rob_env = RoboboCompactEnv(config=env_config)
-    randomization_ranges = None
+    randomization_ranges = RandomizationRanges()
     if args.hardware_calibration:
         randomization_ranges = RandomizationRanges.from_calibration_profiles(
             CalibrationProfile.load(args.calibration),
             CalibrationProfile.load(args.hardware_calibration),
         )
-        if wandb_run is not None:
-            wandb_run.config.update({
-                "derived_randomization_ranges": randomization_ranges.__dict__,
-            }, allow_val_change=True)
+    randomization_ranges = configure_dreamer_randomization(randomization_ranges)
+    if wandb_run is not None:
+        wandb_run.config.update({
+            "derived_randomization_ranges": randomization_ranges.__dict__,
+        }, allow_val_change=True)
     env = DomainRandomizationWrapper(
         rob_env,
         enabled=(args.domain_randomization and curriculum.stage == 2),
