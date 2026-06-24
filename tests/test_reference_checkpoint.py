@@ -10,6 +10,14 @@ from learning_machines.reference_checkpoint import (
     save_checkpoint_atomic,
     validate_checkpoint,
 )
+from train_dreamerv3_reference_push import (
+    REFERENCE_CNN_DEPTH,
+    REFERENCE_CNN_MINRES,
+    REFERENCE_DYN_DETER,
+    REFERENCE_DYN_HIDDEN,
+    REFERENCE_IMAGE_SIZE,
+    REFERENCE_MLP_UNITS,
+)
 
 
 class _ExplodingDescriptor:
@@ -30,6 +38,37 @@ class _Agent(torch.nn.Module):
         self._logger = _ExplodingDescriptor()
         self._config = _ExplodingDescriptor()
         self._dataset = (value for value in ())
+
+
+def test_reference_push_uses_upper_intermediate_model_defaults():
+    assert REFERENCE_IMAGE_SIZE == (96, 96)
+    assert REFERENCE_DYN_HIDDEN == 1024
+    assert REFERENCE_DYN_DETER == 1024
+    assert REFERENCE_MLP_UNITS == 1024
+    assert REFERENCE_CNN_DEPTH == 64
+    assert REFERENCE_CNN_MINRES == 3
+
+
+def test_reference_cnn_round_trips_96_pixel_images():
+    import networks
+
+    encoder = networks.ConvEncoder(
+        (96, 96, 3),
+        depth=REFERENCE_CNN_DEPTH,
+        minres=REFERENCE_CNN_MINRES,
+    )
+    encoded = encoder(torch.zeros(1, 1, 96, 96, 3))
+    assert encoded.shape[-1] == encoder.outdim
+
+    decoder = networks.ConvDecoder(
+        feat_size=32,
+        shape=(3, 96, 96),
+        depth=REFERENCE_CNN_DEPTH,
+        act="ELU",
+        minres=REFERENCE_CNN_MINRES,
+    )
+    decoded = decoder(torch.zeros(1, 1, 32))
+    assert decoded.shape == (1, 1, 96, 96, 3)
 
 
 def test_reference_checkpoint_collects_optimizer_without_traversing_logger():

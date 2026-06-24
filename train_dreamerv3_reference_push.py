@@ -73,6 +73,12 @@ from parallel import Damy
 PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
 PUSH_BLOCK_GOAL_WEIGHT = 20.0
 PUSH_ROBOT_POSE_WEIGHT = 10.0
+REFERENCE_IMAGE_SIZE = (96, 96)
+REFERENCE_DYN_HIDDEN = 1024
+REFERENCE_DYN_DETER = 1024
+REFERENCE_MLP_UNITS = 1024
+REFERENCE_CNN_DEPTH = 64
+REFERENCE_CNN_MINRES = 3
 
 
 class EpisodeStats:
@@ -158,12 +164,15 @@ def main():
     cfg.update(to_native(all_configs.get("robobo", {})))
 
     cfg["task"] = "robobo_push"
-    cfg["size"] = [64, 64]
+    cfg["size"] = list(REFERENCE_IMAGE_SIZE)
     cfg["envs"] = 1
     cfg["action_repeat"] = 1
     cfg["time_limit"] = 200
     cfg["grayscale"] = False
     cfg["prefill"] = 5000
+    cfg["dyn_hidden"] = REFERENCE_DYN_HIDDEN
+    cfg["dyn_deter"] = REFERENCE_DYN_DETER
+    cfg["units"] = REFERENCE_MLP_UNITS
     cfg["model_lr"] = 4e-5
     cfg["actor"] = {
         "layers": 3,
@@ -199,9 +208,9 @@ def main():
         "cnn_keys": "image",
         "act": "SiLU",
         "norm": True,
-        "cnn_depth": 32,
+        "cnn_depth": REFERENCE_CNN_DEPTH,
         "kernel_size": 4,
-        "minres": 4,
+        "minres": REFERENCE_CNN_MINRES,
         "mlp_layers": 5,
         "mlp_units": 1024,
         "symlog_inputs": True,
@@ -211,9 +220,9 @@ def main():
         "cnn_keys": "image",
         "act": "SiLU",
         "norm": True,
-        "cnn_depth": 32,
+        "cnn_depth": REFERENCE_CNN_DEPTH,
         "kernel_size": 4,
-        "minres": 4,
+        "minres": REFERENCE_CNN_MINRES,
         "mlp_layers": 5,
         "mlp_units": 1024,
         "cnn_sigmoid": False,
@@ -223,7 +232,7 @@ def main():
     }
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--logdir", type=str, default="results/nm512_push")
+    parser.add_argument("--logdir", type=str, default="results/nm1024_push_96")
     parser.add_argument("--steps", type=int, default=500_000)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seed", type=int, default=0)
@@ -284,6 +293,12 @@ def main():
         "action_smoothing": False,
         "pre_action_safety": False,
         "max_action_delta": 2.0,
+        "image_size": list(REFERENCE_IMAGE_SIZE),
+        "dyn_hidden": REFERENCE_DYN_HIDDEN,
+        "dyn_deter": REFERENCE_DYN_DETER,
+        "units": REFERENCE_MLP_UNITS,
+        "cnn_depth": REFERENCE_CNN_DEPTH,
+        "cnn_minres": REFERENCE_CNN_MINRES,
     }
     checkpoint = None
     if cli.resume:
@@ -359,15 +374,19 @@ def main():
     print(f"  Steps: {config.steps}")
     print(f"  Device: {config.device}")
     print(f"  Batch: {config.batch_size} x {config.batch_length}")
+    print(f"  Image size: {config.size[0]}x{config.size[1]}")
+    print(
+        "  Network: "
+        f"RSSM hidden={config.dyn_hidden}, "
+        f"deter={config.dyn_deter}, "
+        f"MLP units={config.units}, "
+        f"CNN depth={config.encoder['cnn_depth']}"
+    )
     print(f"  Eval episodes: {config.eval_episode_num}")
     print(f"  Domain randomization: {config.domain_randomization}")
     print(f"  Resume: {cli.resume}")
     print("  Actions: direct (smoothing and pre-action safety disabled)")
-    print(
-        "  Dense weights: "
-        f"block-goal={PUSH_BLOCK_GOAL_WEIGHT}, "
-        f"robot-pose={PUSH_ROBOT_POSE_WEIGHT}"
-    )
+    print("  Reward: sparse success event (0/1)")
 
     train_eps = tools.load_episodes(
         pathlib.Path(config.traindir), limit=config.dataset_size
