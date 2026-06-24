@@ -55,6 +55,7 @@ sys.path.insert(
 from rl_robobo_compact_env import RoboboCompactEnv, RoboboCompactEnvConfig
 from robobo_env_wrapper import RoboboNM512Wrapper
 from domain_randomization import DomainRandomizationWrapper, RandomizationRanges
+from learning_machines.reference_checkpoint import collect_optimizer_state_dicts
 from learning_machines.reference_wandb_media import WandbLogger
 
 import dreamer
@@ -474,7 +475,7 @@ def main():
 
         items_to_save = {
             "agent_state_dict": agent.state_dict(),
-            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+            "optims_state_dict": collect_optimizer_state_dicts(agent),
             "wandb_run_id": wandb.run.id if not cli.no_wandb else None,
         }
         torch.save(items_to_save, logdir / "latest.pt")
