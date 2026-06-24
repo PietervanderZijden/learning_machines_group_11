@@ -27,9 +27,9 @@ import numpy as np
 from gymnasium import spaces
 
 SAC_GAMMA = 0.9801
-PUSH_REWARD_CONTRACT = "robobo-push-dense-v2"
-PUSH_BLOCK_GOAL_WEIGHT = 2.0
-PUSH_ROBOT_POSE_WEIGHT = 1.0
+PUSH_REWARD_CONTRACT = "robobo-push-dense-v3"
+PUSH_BLOCK_GOAL_WEIGHT = 20.0
+PUSH_ROBOT_POSE_WEIGHT = 10.0
 PUSH_STANDOFF_DISTANCE = 0.22
 
 

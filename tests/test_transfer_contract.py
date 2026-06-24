@@ -540,6 +540,34 @@ def test_dense_push_reward_values_approach_and_block_progress():
     assert push_reward > -1.0
 
 
+def test_sac_dense_v3_weights_amplify_progress_signal_tenfold():
+    start = ((-0.50, 0.0), (0.0, 0.0), (1.0, 0.0))
+    approach = ((-0.30, 0.0), (0.0, 0.0), (1.0, 0.0))
+    baseline = _dense_push_env(
+        start,
+        push_block_goal_weight=2.0,
+        push_robot_pose_weight=1.0,
+    )
+    baseline._push_geometry = lambda: approach
+    _, _, baseline_info = baseline._push_reward(
+        _visible_push_obs(), 0.4, False, 0.0
+    )
+    dense_v3 = _dense_push_env(
+        start,
+        push_block_goal_weight=20.0,
+        push_robot_pose_weight=10.0,
+    )
+    dense_v3._push_geometry = lambda: approach
+    _, _, dense_v3_info = dense_v3._push_reward(
+        _visible_push_obs(), 0.4, False, 0.0
+    )
+
+    assert np.isclose(
+        dense_v3_info["potential_shaping"],
+        10.0 * baseline_info["potential_shaping"],
+    )
+
+
 def test_dense_push_success_terminates_without_explicit_success_bonus():
     start = ((0.58, 0.0), (0.80, 0.0), (1.0, 0.0))
     success = ((0.70, 0.0), (0.83, 0.0), (1.0, 0.0))
@@ -739,7 +767,7 @@ def test_sac_recording_metadata_uses_base_env_with_domain_randomization(tmp_path
     episode = np.load(episodes[0])
     assert episode["calibration_profile"].item() == "simulation"
     assert int(episode["phone_tilt"]) == env._base_env.config.phone_tilt
-    assert episode["reward_contract"].item() == "robobo-push-dense-v2"
+    assert episode["reward_contract"].item() == "robobo-push-dense-v3"
 
 
 def test_sac_resume_selects_highest_embedded_timestep(tmp_path):
