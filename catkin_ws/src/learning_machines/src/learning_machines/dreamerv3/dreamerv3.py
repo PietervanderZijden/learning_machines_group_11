@@ -643,6 +643,7 @@ class DreamerV3:
             "cfg": self.cfg,
             "global_step": self._global_step,
             "train_calls": self._train_calls,
+            "replay_buffer": self.buffer.state_dict(),
             "python_rng_state": random.getstate(),
             "numpy_rng_state": np.random.get_state(),
             "torch_rng_state": torch.get_rng_state(),
@@ -671,6 +672,8 @@ class DreamerV3:
         self.return_normalizer.range = ckpt.get("return_normalizer_range", 1.0)
         self._global_step = ckpt.get("global_step", 0)
         self._train_calls = ckpt.get("train_calls", 0)
+        if "replay_buffer" in ckpt:
+            self.buffer.load_state_dict(ckpt["replay_buffer"])
         if "python_rng_state" in ckpt:
             random.setstate(ckpt["python_rng_state"])
         if "numpy_rng_state" in ckpt:

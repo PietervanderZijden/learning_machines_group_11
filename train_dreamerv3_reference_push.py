@@ -70,7 +70,7 @@ import tools
 from parallel import Damy
 
 
-PUSH_REWARD_CONTRACT = "robobo-push-dense-v3"
+PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
 PUSH_BLOCK_GOAL_WEIGHT = 20.0
 PUSH_ROBOT_POSE_WEIGHT = 10.0
 

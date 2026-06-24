@@ -71,7 +71,7 @@ def test_reference_checkpoint_restores_optimizer_state():
 
 
 def test_reference_checkpoint_is_atomic_and_validated(tmp_path):
-    contract = {"reward_contract": "robobo-push-dense-v3"}
+    contract = {"reward_contract": "robobo-push-sparse-v1"}
     path = tmp_path / "latest.pt"
     checkpoint = {
         "checkpoint_version": REFERENCE_CHECKPOINT_VERSION,
@@ -100,7 +100,7 @@ def test_reference_checkpoint_rejects_replay_step_mismatch():
         "agent_state_dict": {},
         "optims_state_dict": {},
         "training_step": 4000,
-        "reward_contract": {"reward_contract": "robobo-push-dense-v3"},
+        "reward_contract": {"reward_contract": "robobo-push-sparse-v1"},
     }
 
     with pytest.raises(ValueError, match="checkpoint/replay step mismatch"):
@@ -117,7 +117,7 @@ def test_reference_checkpoint_allows_one_partial_episode_of_replay_lag():
         "agent_state_dict": {},
         "optims_state_dict": {},
         "training_step": 4000,
-        "reward_contract": {"reward_contract": "robobo-push-dense-v3"},
+        "reward_contract": {"reward_contract": "robobo-push-sparse-v1"},
     }
 
     validate_checkpoint(

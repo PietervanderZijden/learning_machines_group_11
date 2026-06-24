@@ -543,7 +543,7 @@ def _visible_push_obs():
     }
 
 
-def test_dense_push_reward_values_approach_and_block_progress():
+def test_sparse_push_non_success_diagnostics_never_change_reward():
     start = ((-0.50, 0.0), (0.0, 0.0), (1.0, 0.0))
     approach = ((-0.30, 0.0), (0.0, 0.0), (1.0, 0.0))
     push = ((-0.08, 0.0), (0.15, 0.0), (1.0, 0.0))
@@ -562,13 +562,13 @@ def test_dense_push_reward_values_approach_and_block_progress():
 
     assert not approach_done
     assert not push_done
-    assert approach_info["potential_shaping"] > 0.0
-    assert push_info["potential_shaping"] > 0.0
-    assert approach_reward > -1.0
-    assert push_reward > -1.0
+    assert approach_info["potential_shaping"] == 0.0
+    assert push_info["potential_shaping"] == 0.0
+    assert approach_reward == 0.0
+    assert push_reward == 0.0
 
 
-def test_dense_push_v3_weights_amplify_progress_signal_tenfold():
+def test_sparse_push_collision_elapsed_time_and_action_change_are_diagnostics_only():
     start = ((-0.50, 0.0), (0.0, 0.0), (1.0, 0.0))
     approach = ((-0.30, 0.0), (0.0, 0.0), (1.0, 0.0))
     baseline = _dense_push_env(
@@ -577,26 +577,17 @@ def test_dense_push_v3_weights_amplify_progress_signal_tenfold():
         push_robot_pose_weight=1.0,
     )
     baseline._push_geometry = lambda: approach
-    _, _, baseline_info = baseline._push_reward(
-        _visible_push_obs(), 0.4, False, 0.0
+    reward, terminated, info = baseline._push_reward(
+        _visible_push_obs(), 9.0, True, 2.0
     )
-    dense_v3 = _dense_push_env(
-        start,
-        push_block_goal_weight=20.0,
-        push_robot_pose_weight=10.0,
-    )
-    dense_v3._push_geometry = lambda: approach
-    _, _, dense_v3_info = dense_v3._push_reward(
-        _visible_push_obs(), 0.4, False, 0.0
-    )
-
-    assert np.isclose(
-        dense_v3_info["potential_shaping"],
-        10.0 * baseline_info["potential_shaping"],
-    )
+    assert not terminated
+    assert reward == 0.0
+    assert info["time_cost"] == 0.0
+    assert info["collision_penalty"] == 0.0
+    assert info["action_change_penalty"] == 0.0
 
 
-def test_dense_push_success_terminates_without_explicit_success_bonus():
+def test_sparse_push_success_returns_exactly_one_and_terminates():
     start = ((0.58, 0.0), (0.80, 0.0), (1.0, 0.0))
     success = ((0.70, 0.0), (0.83, 0.0), (1.0, 0.0))
     env = _dense_push_env(start, push_success_distance=0.18)
@@ -608,21 +599,13 @@ def test_dense_push_success_terminates_without_explicit_success_bonus():
 
     assert terminated
     assert info["push_success"] == 1.0
-    assert "success_reward" not in info
-    assert np.isclose(reward, info["potential_shaping"] - 1.0)
+    assert reward == 1.0
+    assert info["potential_shaping"] == 0.0
 
 
-def test_dense_push_loop_cannot_outscore_earlier_success():
+def test_sparse_push_discount_favors_earlier_success():
     gamma = 0.997
-    initial_potential = -2.0
-    success_return = -1.0 - initial_potential
-    timeout_steps = 200
-    timeout_return = sum(gamma**step * -1.0 for step in range(timeout_steps))
-    timeout_return += (
-        gamma**timeout_steps * initial_potential - initial_potential
-    )
-
-    assert success_return > timeout_return
+    assert gamma**10 > gamma**20 > 0.0
 
 
 def test_push_success_takes_precedence_on_final_allowed_step():

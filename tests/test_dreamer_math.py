@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 import gymnasium as gym
 
@@ -292,7 +293,7 @@ def test_v3_replay_restores_recent_aligned_recordings(tmp_path):
             dones=np.array([False, False, True]),
             terminals=np.array([False, False, index == 2]),
             observation_contract=np.array("robobo-push-obs-v1"),
-            reward_contract=np.array("robobo-push-dense-v2"),
+            reward_contract=np.array("robobo-push-sparse-v1"),
             control_interval_seconds=np.array(0.4),
         )
     buffer = ReplayBuffer(
@@ -327,6 +328,44 @@ def test_v3_replay_online_queue_and_latent_state_storage():
     refreshed = np.full((4, 5), 2.0, dtype=np.float32)
     buffer.refresh_latent_states(0, refreshed)
     np.testing.assert_allclose(buffer._episodes[0]["latent_state"], refreshed)
+
+
+def test_v3_replay_state_round_trip_preserves_complete_buffer():
+    buffer = ReplayBuffer(3, 2, capacity=20, sequence_length=2)
+    buffer.add_episode(
+        np.zeros((4, 3), dtype=np.float32),
+        np.zeros((3, 2), dtype=np.float32),
+        np.array([0.0, 0.0, 1.0], dtype=np.float32),
+        np.array([False, False, True]),
+    )
+    restored = ReplayBuffer(3, 2, capacity=20, sequence_length=2)
+    restored.load_state_dict(buffer.state_dict())
+    assert restored.size == 3
+    np.testing.assert_array_equal(
+        restored._episodes[0]["reward"], buffer._episodes[0]["reward"]
+    )
+
+
+def test_v3_replay_rejects_dense_push_recordings(tmp_path):
+    episode_dir = tmp_path / "episodes"
+    episode_dir.mkdir()
+    np.savez_compressed(
+        episode_dir / "ep_000000.npz",
+        images=np.zeros((3, 3, 8, 8), dtype=np.uint8),
+        irs=np.zeros((3, 8), dtype=np.float32),
+        actions=np.zeros((2, 2), dtype=np.float32),
+        rewards=np.zeros(2, dtype=np.float32),
+        dones=np.array([False, True]),
+        terminals=np.array([False, True]),
+        observation_contract=np.array("robobo-push-obs-v1"),
+        reward_contract=np.array("robobo-push-dense-v2"),
+        control_interval_seconds=np.array(0.4),
+    )
+    buffer = ReplayBuffer(
+        3, 2, capacity=20, sequence_length=2, obs_shape=(3, 8, 8), ir_dim=8
+    )
+    with pytest.raises(ValueError, match="incompatible recorded push reward contract"):
+        buffer.restore_recorded_episodes(tmp_path)
 
 
 def test_v3_recurrent_context_uses_executed_action():

@@ -9,7 +9,11 @@ from learning_machines.dreamerv3.dreamerv3 import green_saliency_loss
 from learning_machines.dreamerv3.optim import LaProp, adaptive_clip_grad_
 from learning_machines.coppelia_startup import check_coppelia_service
 from train_dreamerv3 import dreamer_updates_per_env_step
-from train_sac import RoboboSACEnv
+try:
+    from train_sac import RoboboSACEnv
+    SAC_AVAILABLE = True
+except ImportError:
+    SAC_AVAILABLE = False
 
 
 def test_dreamer_replay_ratio_converts_transitions_to_update_frequency():
@@ -72,6 +76,7 @@ def test_dreamerv3_agc_rejects_non_finite_gradients():
         adaptive_clip_grad_([parameter], clipping=0.3)
 
 
+@pytest.mark.skipif(not SAC_AVAILABLE, reason="SAC is not on this branch")
 def test_sac_observation_includes_previous_executed_action():
     env = RoboboSACEnv.__new__(RoboboSACEnv)
     env._previous_executed_action = torch.tensor([0.25, -0.5]).numpy()

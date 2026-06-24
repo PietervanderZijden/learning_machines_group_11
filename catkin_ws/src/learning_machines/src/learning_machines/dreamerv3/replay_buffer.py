@@ -71,6 +71,21 @@ class ReplayBuffer:
             try:
                 with np.load(path, allow_pickle=False) as data:
                     length = len(data["actions"])
+                    observation_contract = data.get(
+                        "observation_contract", np.array("")
+                    ).item()
+                    reward_contract = data.get(
+                        "reward_contract", np.array("")
+                    ).item()
+                    if (
+                        observation_contract == "robobo-push-obs-v1"
+                        and reward_contract
+                        and reward_contract != "robobo-push-sparse-v1"
+                    ):
+                        raise ValueError(
+                            f"incompatible recorded push reward contract "
+                            f"{reward_contract}; expected robobo-push-sparse-v1"
+                        )
                     valid = (
                         "images" in data
                         and "rewards" in data
@@ -79,7 +94,7 @@ class ReplayBuffer:
                         and data.get("observation_contract", np.array("")).item()
                         == "robobo-push-obs-v1"
                         and data.get("reward_contract", np.array("")).item()
-                        == "robobo-push-dense-v2"
+                        == "robobo-push-sparse-v1"
                         and np.isclose(
                             data.get(
                                 "control_interval_seconds", np.array(-1.0)
@@ -93,7 +108,7 @@ class ReplayBuffer:
                         valid = valid and "irs" in data and len(data["irs"]) == length + 1
                 if not valid:
                     continue
-            except (OSError, KeyError, ValueError):
+            except (OSError, KeyError):
                 continue
             selected.append(path)
             transitions += length
@@ -118,6 +133,23 @@ class ReplayBuffer:
     @property
     def size(self) -> int:
         return self._total_transitions
+
+    def state_dict(self) -> dict:
+        """Return complete replay state for checkpoint/resume."""
+        return {
+            "episodes": self._episodes,
+            "online_queue": self._online_queue,
+            "online_transitions": self._online_transitions,
+            "total_transitions": self._total_transitions,
+            "current_episode": self._current_episode,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self._episodes = list(state.get("episodes", ()))
+        self._online_queue = list(state.get("online_queue", ()))
+        self._online_transitions = int(state.get("online_transitions", 0))
+        self._total_transitions = int(state.get("total_transitions", 0))
+        self._current_episode = state.get("current_episode", self._current_episode)
 
     def add(
         self,

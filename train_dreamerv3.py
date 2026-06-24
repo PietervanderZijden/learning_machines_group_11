@@ -24,10 +24,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-PUSH_REWARD_CONTRACT = "robobo-push-dense-v2"
-PUSH_BLOCK_GOAL_WEIGHT = 2.0
-PUSH_ROBOT_POSE_WEIGHT = 1.0
-PUSH_STANDOFF_DISTANCE = 0.22
+PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
 
 
 class _NullSummaryWriter:
@@ -274,12 +271,6 @@ def main():
         default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
     )
     parser.add_argument("--max-episode-steps", type=int, default=200)
-    parser.add_argument(
-        "--push-layout-randomization",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Randomize red block and green goal positions on each simulator reset.",
-    )
     parser.add_argument("--checkpoint-dir", type=str, default="dreamerv3_models")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument(
@@ -314,8 +305,8 @@ def main():
     parser.add_argument(
         "--reward-event-fraction",
         type=float,
-        default=0.0,
-        help="Opt-in sparse-reward oversampling fraction; 0.0 is uniform replay.",
+        default=0.25,
+        help="Fraction of replay sequences sampled around sparse success events.",
     )
     parser.add_argument(
         "--reward-event-threshold",
@@ -345,18 +336,6 @@ def main():
     parser.add_argument("--buffer-capacity", type=int, default=100_000)
     parser.add_argument("--checkpoint-every", type=int, default=10000)
     parser.add_argument(
-        "--time-penalty-per-second",
-        type=float,
-        default=2.5,
-        help="Elapsed-time cost; 2.5/s equals 1.0 per 400 ms transition.",
-    )
-    parser.add_argument(
-        "--action-change-penalty",
-        type=float,
-        default=0.0,
-        help="Push-task penalty for large action changes.",
-    )
-    parser.add_argument(
         "--object-recon-weight",
         type=float,
         default=0.0,
@@ -378,16 +357,18 @@ def main():
                         help="Image size for recording (default: 64x64)")
     parser.add_argument("--calibration", default="config/calibration/simulation.json")
     parser.add_argument("--hardware-calibration", default=None)
-    parser.add_argument("--curriculum", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--curriculum", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--domain-randomization",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Enable domain randomization wrapper. Use --no-domain-randomization to disable.",
     )
-    parser.add_argument("--curriculum-one-food-steps", type=int, default=100_000)
-    parser.add_argument("--curriculum-three-food-steps", type=int, default=250_000)
-    parser.add_argument("--randomization-start-steps", type=int, default=300_000)
+    parser.add_argument("--curriculum-start-stage", type=int, choices=(0, 1, 2), default=0)
+    parser.add_argument("--curriculum-success-threshold", type=float, default=0.80)
+    parser.add_argument("--curriculum-window", type=int, default=100)
+    parser.add_argument("--curriculum-min-stage-steps", type=int, default=20_000)
+    parser.add_argument("--curriculum-goal-jitter-radius", type=float, default=0.20)
     explicit_options = _explicit_cli_options(sys.argv[1:])
     args = parser.parse_args()
     preset_overrides = THROUGHPUT_PRESETS[args.throughput_preset]
@@ -456,6 +437,10 @@ def main():
     from learning_machines.domain_randomization import DomainRandomizationWrapper
     from learning_machines.domain_randomization import RandomizationRanges
     from learning_machines.transfer import CalibrationProfile, CheckpointManifest
+    from learning_machines.push_curriculum import (
+        PushCurriculumConfig,
+        PushCurriculumController,
+    )
 
     # Config - use smaller buffer and a bounded number of imagination starts
     # for the image-based Robobo workload.
@@ -504,7 +489,7 @@ def main():
             "control_interval_seconds": 0.4,
             "phone_tilt": 100,
             "task": "push",
-            "push_layout_randomization": args.push_layout_randomization,
+            "curriculum_start_stage": args.curriculum_start_stage,
             "model_size": cfg.model_size,
             "world_lr": cfg.world_lr,
             "actor_lr": cfg.actor_lr,
@@ -515,6 +500,42 @@ def main():
             "replay_value_weight": cfg.replay_value_weight,
         }, allow_val_change=True)
 
+    checkpoint_dir = Path(args.checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    model_path = checkpoint_dir / "dreamerv3_latest.pt"
+    best_model_path = checkpoint_dir / "dreamerv3_best.pt"
+    curriculum_state_path = checkpoint_dir / "curriculum_state.json"
+    existing_manifest_path = checkpoint_dir / "manifest.json"
+    if existing_manifest_path.exists():
+        existing_manifest = CheckpointManifest.load(existing_manifest_path)
+        if existing_manifest.reward_contract != PUSH_REWARD_CONTRACT:
+            raise ValueError(
+                f"{checkpoint_dir} uses reward contract "
+                f"{existing_manifest.reward_contract}; sparse push training requires "
+                "a fresh checkpoint directory"
+            )
+    if curriculum_state_path.exists() and not args.resume:
+        raise ValueError(
+            f"{checkpoint_dir} already contains curriculum state. "
+            "Pass --resume or choose a fresh checkpoint directory."
+        )
+    curriculum_config = PushCurriculumConfig(
+        enabled=args.curriculum,
+        start_stage=args.curriculum_start_stage,
+        success_threshold=args.curriculum_success_threshold,
+        window=args.curriculum_window,
+        min_stage_steps=args.curriculum_min_stage_steps,
+        goal_jitter_radius=args.curriculum_goal_jitter_radius,
+    )
+    if args.resume:
+        if not curriculum_state_path.exists():
+            raise ValueError("refusing to resume without curriculum_state.json")
+        curriculum = PushCurriculumController.load(
+            curriculum_state_path, curriculum_config
+        )
+    else:
+        curriculum = PushCurriculumController(curriculum_config)
+
     # Environment
     env_config = RoboboCompactEnvConfig(
         task="push",
@@ -522,15 +543,10 @@ def main():
         return_image=True,
         image_obs_size=(args.image_size, args.image_size),
         calibration_path=args.calibration,
-        randomize_push_layout=args.push_layout_randomization,
-        time_penalty_per_second=args.time_penalty_per_second,
-        push_time_penalty_per_second=args.time_penalty_per_second,
-        action_change_penalty=args.action_change_penalty,
-        push_action_change_penalty=args.action_change_penalty,
+        randomize_push_layout=True,
+        push_curriculum_stage=curriculum.stage,
+        push_goal_jitter_radius=args.curriculum_goal_jitter_radius,
         push_discount=cfg.gamma,
-        push_block_goal_weight=PUSH_BLOCK_GOAL_WEIGHT,
-        push_robot_pose_weight=PUSH_ROBOT_POSE_WEIGHT,
-        push_standoff_distance=PUSH_STANDOFF_DISTANCE,
     )
     rob_env = RoboboCompactEnv(config=env_config)
     randomization_ranges = None
@@ -545,22 +561,17 @@ def main():
             }, allow_val_change=True)
     env = DomainRandomizationWrapper(
         rob_env,
-        enabled=(args.domain_randomization and not args.curriculum),
+        enabled=(args.domain_randomization and curriculum.stage == 2),
         ranges=randomization_ranges,
     )
 
-    def apply_curriculum(step: int) -> tuple[int, bool]:
-        active_food = 0
-        env_config.active_food_count = active_food
-        randomization_enabled = (
-            args.domain_randomization
-            and (not args.curriculum or step >= args.randomization_start_steps)
-        )
-        if env.enabled is not None:
-            env.enabled = randomization_enabled
-        return active_food, randomization_enabled
+    def apply_curriculum() -> bool:
+        env_config.push_curriculum_stage = curriculum.stage
+        randomization_enabled = args.domain_randomization and curriculum.stage == 2
+        env.enabled = randomization_enabled
+        return randomization_enabled
 
-    apply_curriculum(agent.global_step)
+    apply_curriculum()
 
     # Image episode recorder
     record_dir = Path(args.record_dir)
@@ -576,12 +587,6 @@ def main():
         next_episode_id = max(existing_episode_ids, default=-1) + 1
     else:
         next_episode_id = 0
-
-    # Checkpointing
-    checkpoint_dir = Path(args.checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    model_path = checkpoint_dir / "dreamerv3_latest.pt"
-    best_model_path = checkpoint_dir / "dreamerv3_best.pt"
 
     # Tensorboard
     log_dir = checkpoint_dir / "logs"
@@ -614,26 +619,26 @@ def main():
                 manifest.reward_contract,
                 PUSH_REWARD_CONTRACT,
             ),
-            "push_layout_randomization": (
-                manifest.algorithm_config.get("push_layout_randomization"),
-                args.push_layout_randomization,
-            ),
             "max_episode_steps": (
                 manifest.algorithm_config.get("max_episode_steps"),
                 args.max_episode_steps,
             ),
             "gamma": (manifest.algorithm_config.get("gamma"), cfg.gamma),
-            "push_block_goal_weight": (
-                manifest.algorithm_config.get("push_block_goal_weight"),
-                PUSH_BLOCK_GOAL_WEIGHT,
+            "curriculum": (
+                manifest.algorithm_config.get("curriculum"),
+                args.curriculum,
             ),
-            "push_robot_pose_weight": (
-                manifest.algorithm_config.get("push_robot_pose_weight"),
-                PUSH_ROBOT_POSE_WEIGHT,
+            "curriculum_success_threshold": (
+                manifest.algorithm_config.get("curriculum_success_threshold"),
+                args.curriculum_success_threshold,
             ),
-            "push_standoff_distance": (
-                manifest.algorithm_config.get("push_standoff_distance"),
-                PUSH_STANDOFF_DISTANCE,
+            "curriculum_window": (
+                manifest.algorithm_config.get("curriculum_window"),
+                args.curriculum_window,
+            ),
+            "curriculum_min_stage_steps": (
+                manifest.algorithm_config.get("curriculum_min_stage_steps"),
+                args.curriculum_min_stage_steps,
             ),
         }
         manifest_mismatches = {
@@ -647,11 +652,17 @@ def main():
             )
         agent.load(model_path)
         print(f"Resumed from {model_path}, step={agent.global_step}")
-        restored = agent.buffer.restore_recorded_episodes(args.record_dir)
-        print(
-            f"Restored {restored:,} recent transitions from recorded episodes "
-            f"into Dreamer replay"
-        )
+        if agent.buffer.size == 0:
+            restored = agent.buffer.restore_recorded_episodes(args.record_dir)
+            print(
+                f"Restored {restored:,} recent transitions from recorded episodes "
+                f"into Dreamer replay"
+            )
+        else:
+            print(
+                f"Restored complete Dreamer replay from checkpoint "
+                f"({agent.buffer.size:,} transitions)"
+            )
     else:
         print("Starting fresh training")
 
@@ -707,8 +718,24 @@ def main():
             ir_obs = next_ir
             steps_prefilled += 1
             agent.global_step += 1
+            curriculum.record_transition()
 
             if done:
+                promotion = curriculum.record_episode(
+                    bool(info.get("push_success", 0.0))
+                )
+                curriculum.save(curriculum_state_path)
+                apply_curriculum()
+                if promotion is not None:
+                    agent.save(model_path)
+                    agent.save(
+                        checkpoint_dir
+                        / f"dreamerv3_promotion_stage_{curriculum.stage}.pt"
+                    )
+                    print(
+                        f"Promoted push curriculum to stage {curriculum.stage} "
+                        f"({curriculum.stage_name}); checkpoint saved"
+                    )
                 obs_dict, info = env.reset()
                 if cfg.use_multimodal and "image" in obs_dict:
                     obs = obs_dict["image"].astype(np.float32) / 255.0
@@ -761,6 +788,7 @@ def main():
     update_budget = 0.0
     last_recon_step = -args.log_interval
     best_success_rate = float("-inf")
+    best_stage = -1
     best_metrics_path = checkpoint_dir / "best_metrics.json"
     if best_metrics_path.exists():
         try:
@@ -768,6 +796,7 @@ def main():
             best_success_rate = float(
                 data.get("rolling_success_rate", data.get("rolling_food_mean"))
             )
+            best_stage = int(data.get("curriculum_stage", -1))
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             best_success_rate = float("-inf")
     policy_state = None
@@ -837,32 +866,80 @@ def main():
                 bool(info.get("safety_with_visible_block", False))
             )
             agent.global_step += 1
+            curriculum.record_transition()
 
             logger.update(1)
 
             if done:
                 success = float(info.get("push_success", 0.0))
+                episode_stage = curriculum.stage
+                promotion = curriculum.record_episode(bool(success))
+                if promotion is not None:
+                    stage_steps = int(promotion["stage_steps"])
+                    stage_episodes = int(promotion["episodes"])
+                    stage_success_rate = float(promotion["success_rate"])
+                else:
+                    stage_steps = curriculum.stage_steps
+                    stage_episodes = len(curriculum.recent_outcomes)
+                    stage_success_rate = curriculum.rolling_success
+                curriculum.save(curriculum_state_path)
+                randomization_enabled = apply_curriculum()
+                if promotion is not None:
+                    agent.save(model_path)
+                    agent.save(
+                        checkpoint_dir
+                        / f"dreamerv3_promotion_stage_{curriculum.stage}.pt"
+                    )
+                    tqdm.write(
+                        f"[Curriculum] Promoted to stage {curriculum.stage} "
+                        f"({curriculum.stage_name}); checkpoint saved"
+                    )
                 logger.record_episode(episode_reward, episode_length, success)
-                if len(logger.episode_successes) >= 20:
-                    rolling_success_mean = float(np.mean(logger.episode_successes))
-                    if rolling_success_mean > best_success_rate:
-                        best_success_rate = rolling_success_mean
-                        agent.save(best_model_path)
-                        best_metrics_path.write_text(
-                            json.dumps(
-                                {
-                                    "global_step": agent.global_step,
-                                    "rolling_episodes": len(logger.episode_successes),
-                                    "rolling_success_rate": best_success_rate,
-                                },
-                                indent=2,
-                            )
-                            + "\n"
+                if stage_episodes:
+                    stage_metrics_path = (
+                        checkpoint_dir / f"best_metrics_stage_{episode_stage}.json"
+                    )
+                    previous_stage_rate = float("-inf")
+                    if stage_metrics_path.exists():
+                        previous_stage_rate = float(
+                            json.loads(stage_metrics_path.read_text())[
+                                "rolling_success_rate"
+                            ]
                         )
-                        tqdm.write(
-                            f"[Checkpoint] New best rolling success rate "
-                            f"{best_success_rate:.3f} at step {agent.global_step:,}"
+                    if stage_success_rate > previous_stage_rate:
+                        agent.save(
+                            checkpoint_dir
+                            / f"dreamerv3_best_stage_{episode_stage}.pt"
                         )
+                        stage_metrics_path.write_text(json.dumps({
+                            "global_step": agent.global_step,
+                            "curriculum_stage": episode_stage,
+                            "rolling_episodes": stage_episodes,
+                            "rolling_success_rate": stage_success_rate,
+                        }, indent=2) + "\n")
+                if (episode_stage, stage_success_rate) > (
+                    best_stage,
+                    best_success_rate,
+                ):
+                    best_stage = episode_stage
+                    best_success_rate = stage_success_rate
+                    agent.save(best_model_path)
+                    best_metrics_path.write_text(
+                        json.dumps(
+                            {
+                                "global_step": agent.global_step,
+                                "curriculum_stage": episode_stage,
+                                "rolling_episodes": stage_episodes,
+                                "rolling_success_rate": best_success_rate,
+                            },
+                            indent=2,
+                        )
+                        + "\n"
+                    )
+                    tqdm.write(
+                        f"[Checkpoint] New best rolling success rate "
+                        f"{best_success_rate:.3f} at step {agent.global_step:,}"
+                    )
                 episode_metrics = {
                     "episode/return": float(episode_reward),
                     "episode/length": int(episode_length),
@@ -878,6 +955,10 @@ def main():
                     "episode/red_block_visible": float(info.get("red_block_visible", 0.0)),
                     "episode/green_goal_visible": float(info.get("green_goal_visible", 0.0)),
                     "episode/push_layout_randomized": float(info.get("push_layout_randomized", 0.0)),
+                    "curriculum/stage": float(episode_stage),
+                    "curriculum/stage_steps": float(stage_steps),
+                    "curriculum/stage_episodes": float(stage_episodes),
+                    "curriculum/rolling_success": float(stage_success_rate),
                     "episode/collisions": int(episode_collisions),
                     "episode/safety_overrides": int(episode_safety_overrides),
                     "episode/mean_action_change": episode_action_change / max(1, episode_length),
@@ -894,12 +975,8 @@ def main():
                         else np.mean(logger.episode_successes)
                     ),
                 }
-                active_food, randomization_enabled = apply_curriculum(
-                    agent.global_step
-                )
                 episode_metrics.update(
                     {
-                        "curriculum/push_task": 1.0,
                         "curriculum/randomization_enabled": float(
                             randomization_enabled
                         ),
@@ -909,6 +986,12 @@ def main():
                     writer.add_scalar(key, value, agent.global_step)
                 if wandb_run is not None:
                     wandb_payload = dict(episode_metrics)
+                    wandb_payload["curriculum/stage_name"] = (
+                        "fixed", "goal_jitter", "full"
+                    )[episode_stage]
+                    wandb_payload["curriculum/object_randomization_mode"] = info.get(
+                        "push_layout_mode"
+                    )
                     if "image" in obs_dict and episode_count % 10 == 0:
                         import wandb
                         wandb_payload["diagnostics/camera_frame"] = wandb.Image(
@@ -939,6 +1022,13 @@ def main():
                         "terminals": np.array(episode_terminals, dtype=bool),
                         "observation_contract": np.array("robobo-push-obs-v1"),
                         "reward_contract": np.array(PUSH_REWARD_CONTRACT),
+                        "curriculum_stage": np.array(episode_stage),
+                        "curriculum_stage_name": np.array(
+                            ("fixed", "goal_jitter", "full")[episode_stage]
+                        ),
+                        "push_layout_mode": np.array(
+                            info.get("push_layout_mode", "full")
+                        ),
                         "control_interval_seconds": np.array(0.4),
                         "calibration_profile": np.array(
                             env.unwrapped.observation_adapter.profile.name
@@ -1084,6 +1174,7 @@ def main():
     finally:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         agent.save(model_path)
+        curriculum.save(curriculum_state_path)
         calibration_name = CalibrationProfile.load(args.calibration).name
         CheckpointManifest(
             algorithm="dreamerv3",
@@ -1097,20 +1188,16 @@ def main():
                 "critic_lr": cfg.critic_lr,
                 "use_multimodal": cfg.use_multimodal,
                 "task": "push",
-                "push_layout_randomization": args.push_layout_randomization,
                 "model_size": cfg.model_size,
                 "cnn_base_channels": cfg.cnn_base_channels,
                 "block_gru_blocks": cfg.block_gru_blocks,
                 "ir_dim": cfg.ir_dim,
-                "domain_randomization": True,
+                "domain_randomization": args.domain_randomization,
                 "hardware_calibration": args.hardware_calibration,
                 "sequence_length": cfg.sequence_length,
                 "imagination_horizon": cfg.imagination_horizon,
                 "gamma": cfg.gamma,
                 "max_episode_steps": args.max_episode_steps,
-                "push_block_goal_weight": PUSH_BLOCK_GOAL_WEIGHT,
-                "push_robot_pose_weight": PUSH_ROBOT_POSE_WEIGHT,
-                "push_standoff_distance": PUSH_STANDOFF_DISTANCE,
                 "reward_event_fraction": cfg.reward_event_fraction,
                 "reward_event_threshold": cfg.reward_event_threshold,
                 "train_ratio": args.train_ratio,
@@ -1125,9 +1212,12 @@ def main():
                 "replay_value_weight": cfg.replay_value_weight,
                 "food_recon_weight": cfg.food_recon_weight,
                 "curriculum": args.curriculum,
-                "curriculum_one_food_steps": args.curriculum_one_food_steps,
-                "curriculum_three_food_steps": args.curriculum_three_food_steps,
-                "randomization_start_steps": args.randomization_start_steps,
+                "curriculum_stage": curriculum.stage,
+                "curriculum_stage_name": curriculum.stage_name,
+                "curriculum_success_threshold": args.curriculum_success_threshold,
+                "curriculum_window": args.curriculum_window,
+                "curriculum_min_stage_steps": args.curriculum_min_stage_steps,
+                "curriculum_goal_jitter_radius": args.curriculum_goal_jitter_radius,
             },
         ).save(checkpoint_dir / "manifest.json")
         logger.close()
