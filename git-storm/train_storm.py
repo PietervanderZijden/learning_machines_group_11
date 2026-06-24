@@ -13,10 +13,34 @@ from pathlib import Path
 import torch
 from einops import rearrange
 
-# Voeg je catkin_ws toe aan het pad (pas dit aan als je mappenstructuur anders is)
-project_root = Path(__file__).resolve().parent
+# ==============================================================================
+# GLOBAL PROJECT ROOT RESOLUTIE (KIJK OVERAL IN LEARNING_MACHINES_GROUP_11)
+# ==============================================================================
+current_dir = Path(__file__).resolve().parent
+
+# Zorg dat de git-storm map zelf vindbaar blijft voor utils, agents, etc.
+if str(current_dir) not in sys.path:
+    sys.path.insert(0, str(current_dir))
+
+# Zoek de hoofdmap (waar catkin_ws in leeft)
+project_root = None
+for parent in [current_dir] + list(current_dir.parents):
+    if (parent / "catkin_ws").exists():
+        project_root = parent
+        break
+
+if project_root is None:
+    print(f"❌ KRITIEK ALARM: Kon de hoofdmap nergens vinden boven {current_dir}!")
+    sys.exit(1)
+
+# VERWISSEL DE WERKINGSMAP: Vanaf nu is 'learning_machines_group_11' de basis voor alles!
+os.chdir(project_root)
+print(f"✅ Succesvol verankerd in project root: {project_root}")
+
+# Voeg de src mappen toe aan het Python pad zodat imports overal werken
 sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "learning_machines" / "src"))
 sys.path.insert(0, str(project_root / "catkin_ws" / "src" / "robobo_interface" / "src"))
+# ==============================================================================
 
 from utils import seed_np_torch, Logger, load_config
 from replay_buffer import ReplayBuffer
@@ -30,13 +54,20 @@ from learning_machines.rl_robobo_compact_env import RoboboCompactEnvConfig
 from learning_machines.domain_randomization import RandomizationRanges
 from learning_machines.transfer import CalibrationProfile
 
+# ==============================================================================
+# MAC MULTIPROCESSING PATCH (Voorkom ZMQ poort-botsingen)
+# ==============================================================================
+import gymnasium as gym
+gym.vector.AsyncVectorEnv = gym.vector.SyncVectorEnv
+if hasattr(env_wrapper, 'gym'):
+    env_wrapper.gym.vector.AsyncVectorEnv = gym.vector.SyncVectorEnv
+# ==============================================================================
+
 
 def train_world_model_step(replay_buffer: ReplayBuffer, world_model: Union[WorldModel, GITWorldModel], batch_size, demonstration_batch_size, batch_length, logger, wandb_run=None, step=0):
     obs, action, reward, termination = replay_buffer.sample(batch_size, demonstration_batch_size, batch_length)
     world_model.update(obs, action, reward, termination, logger=logger)
-    
-    # Als GIT-STORM interne logging gebruikt, kunnen we specifieke losses eventueel later uithalen.
-    # Voor nu stuurt hun model het al naar TensorBoard (logger).
+
 
 @torch.no_grad()
 def world_model_imagine_data(replay_buffer: ReplayBuffer,
@@ -62,10 +93,10 @@ def world_model_imagine_data(replay_buffer: ReplayBuffer,
 def joint_train_world_model_agent(env_config, ranges, args, conf,
                                   replay_buffer: ReplayBuffer,
                                   world_model: Union[WorldModel, GITWorldModel], agent: agents.ActorCriticAgent,
-                                  logger, wandb_run=None):
+                                  logger, device, wandb_run=None):
     os.makedirs(f"ckpt/{conf.BasicSettings.n}", exist_ok=True)
 
-    # 1. Start de Robobo Vector Omgeving!
+    # Start de Robobo Vector Omgeving
     vec_env = env_wrapper.build_robobo_vec_env(env_config, num_envs=conf.JointTrainAgent.NumEnvs, ranges=ranges)
     print("Current env: " + colorama.Fore.YELLOW + "Robobo CoppeliaSim" + colorama.Style.RESET_ALL)
 
@@ -86,7 +117,6 @@ def joint_train_world_model_agent(env_config, ranges, args, conf,
             active_food = 7
         env_config.active_food_count = active_food
         randomization_enabled = step >= args.randomization_start_steps
-        # Pas de interne wrapper aan (DomainRandomization zit als base in onze wrapper)
         vec_env.envs[0].env.enabled = randomization_enabled
         return active_food, randomization_enabled
 
@@ -96,7 +126,6 @@ def joint_train_world_model_agent(env_config, ranges, args, conf,
     # Training Loop
     for total_steps in tqdm(range(max_steps // num_envs), disable=conf.BasicSettings.silent):
         
-        # --- Curriculum check ---
         active_food, is_randomized = apply_curriculum(total_steps)
 
         # --- Sample Part ---
@@ -109,22 +138,20 @@ def joint_train_world_model_agent(env_config, ranges, args, conf,
                 else:
                     context_latent = world_model.encode_obs(torch.cat(list(context_obs), dim=1))
                     model_context_action = np.stack(list(context_action), axis=1)
-                    model_context_action = torch.Tensor(model_context_action).cuda()
+                    model_context_action = torch.Tensor(model_context_action).to(device)
                     prior_flattened_sample, last_dist_feat = world_model.calc_last_dist_feat(context_latent, model_context_action)
                     action = agent.sample_as_env_action(
                         torch.cat([prior_flattened_sample, last_dist_feat], dim=-1),
                         greedy=False
                     )
 
-            context_obs.append(rearrange(torch.Tensor(current_obs).cuda(), "B H W C -> B 1 C H W") / 255)
+            context_obs.append(rearrange(torch.Tensor(current_obs).to(device), "B H W C -> B 1 C H W") / 255)
             context_action.append(action)
         else:
             action = vec_env.action_space.sample()
 
         obs, reward, done, truncated, info = vec_env.step(action)
         
-        # Sla op in replay buffer
-        # Let op: de GIT-STORM buffer verwacht termination als boolean of float.
         is_terminal = np.logical_or(done, truncated)
         replay_buffer.append(current_obs, action, reward, is_terminal)
 
@@ -176,8 +203,6 @@ def joint_train_world_model_agent(env_config, ranges, args, conf,
                 logger=logger
             )
 
-            # De update functie geeft een zooi aan metrics terug in de GIT-STORM code.
-            # We vangen ze op (aangepast naar hun return statement) om naar wandb te sturen.
             metrics = agent.update(
                 latent=imagine_latent,
                 action=agent_action,
@@ -188,7 +213,6 @@ def joint_train_world_model_agent(env_config, ranges, args, conf,
                 logger=logger
             )
             
-            # W&B Logging voor de agent losses (als de update functie dit teruggeeft)
             if wandb_run is not None and isinstance(metrics, tuple) and len(metrics) >= 4:
                 wandb_run.log({
                     "train/actor_loss": float(metrics[1]),
@@ -213,7 +237,7 @@ def build_world_model(conf, action_dim, device: torch.device):
             transformer_hidden_dim=conf.Models.WorldModel.TransformerHiddenDim,
             transformer_num_layers=conf.Models.WorldModel.TransformerNumLayers,
             transformer_num_heads=conf.Models.WorldModel.TransformerNumHeads,
-        ).cuda()
+        ).to(device)
     elif conf.JointTrainAgent.ModelType == "GITSTORM":
         return GITWorldModel(
             in_channels=conf.Models.WorldModel.InChannels,
@@ -224,10 +248,10 @@ def build_world_model(conf, action_dim, device: torch.device):
             transformer_num_heads=conf.Models.WorldModel.TransformerNumHeads,
             device=device,
             conf=conf
-        ).cuda()
+        ).to(device)
 
 
-def build_agent(conf, action_dim):
+def build_agent(conf, action_dim, device: torch.device):
     return agents.ActorCriticAgent(
         feat_dim=32*32+conf.Models.WorldModel.TransformerHiddenDim,
         num_layers=conf.Models.Agent.NumLayers,
@@ -236,7 +260,7 @@ def build_agent(conf, action_dim):
         gamma=conf.Models.Agent.Gamma,
         lambd=conf.Models.Agent.Lambda,
         entropy_coef=conf.Models.Agent.EntropyCoef,
-    ).cuda()
+    ).to(device)
 
 
 def main():
@@ -245,7 +269,7 @@ def main():
     torch.backends.cudnn.allow_tf32 = True
 
     parser = argparse.ArgumentParser(description="GIT-STORM for Robobo")
-    parser.add_argument("--config-path", type=str, default="config_files/robobo_gitstorm.yaml")
+    parser.add_argument("--config-path", type=str, default="git-storm/config_files/robobo_gitstorm.yaml")
     parser.add_argument("--port", type=int, default=23000)
     parser.add_argument("--host", default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"))
     parser.add_argument("--no-wandb", action="store_true")
@@ -264,10 +288,26 @@ def main():
     print(f"Connecting to simulator at {args.host}:{args.port}...")
     check_coppelia_service(args.host, args.port)
 
-    # Laad configuratie met de YACS parser van GIT-STORM
+    # Laad configuratie
     conf = load_config(args.config_path)
     seed_np_torch(seed=conf.BasicSettings.Seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # FORCEER 1 OMGEVING OP MAC (Defrost/Freeze toegevoegd om CfgNode immutability te omzeilen)
+    if hasattr(conf, 'defrost'):
+        conf.defrost()
+    conf.JointTrainAgent.NumEnvs = 1
+    if hasattr(conf, 'freeze'):
+        conf.freeze()
+    
+    # DEVICE RESOLUTIE VOOR MAC (MPS / CPU) EN LINUX/WINDOWS (CUDA)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    print(f"📡 Actief hardware-device: {colorama.Fore.GREEN}{device}{colorama.Style.RESET_ALL}")
+
     logger = Logger(path=f"runs/{conf.BasicSettings.n}")
 
     # Initialiseer W&B
@@ -277,7 +317,6 @@ def main():
         run_name = args.wandb_run_name or f"gitstorm-{datetime.datetime.now().strftime('%m%d-%H%M%S')}"
         wandb_run = wandb.init(
             project="learning-machines",
-            entity="Learningmachine",
             name=run_name,
             config=vars(args),
             sync_tensorboard=True
@@ -286,7 +325,7 @@ def main():
     # Configuratie voor Robobo
     env_config = RoboboCompactEnvConfig(
         max_episode_steps=150,
-        return_image=True, # We pakken de image
+        return_image=True, 
         image_obs_size=(conf.BasicSettings.ImageSize, conf.BasicSettings.ImageSize),
         calibration_path=args.calibration,
         active_food_count=1 if args.curriculum else None,
@@ -299,20 +338,23 @@ def main():
             CalibrationProfile.load(args.hardware_calibration),
         )
 
-    action_dim = 25  # Omdat we 25 discrete knoppen hebben gemaakt!
+    action_dim = 25  
 
     world_model = build_world_model(conf, action_dim, device)
-    world_model = torch.compile(world_model, mode="max-autotune")
-    agent = build_agent(conf, action_dim)
-    agent = torch.compile(agent, mode="max-autotune")
+    agent = build_agent(conf, action_dim, device)
 
-    # Buffer (Verwacht (H, W, C) = (64, 64, 3))
+    # torch.compile werkt alleen stabiel op NVIDIA CUDA, dus we skippen het op Mac
+    if device.type == "cuda":
+        world_model = torch.compile(world_model, mode="max-autotune")
+        agent = torch.compile(agent, mode="max-autotune")
+
+    # Buffer instellen
     replay_buffer = ReplayBuffer(
         obs_shape=(conf.BasicSettings.ImageSize, conf.BasicSettings.ImageSize, 3),
         num_envs=conf.JointTrainAgent.NumEnvs,
         max_length=conf.JointTrainAgent.BufferMaxLength,
         warmup_length=conf.JointTrainAgent.BufferWarmUp,
-        store_on_gpu=conf.BasicSettings.ReplayBufferOnGPU,
+        store_on_gpu=conf.BasicSettings.ReplayBufferOnGPU and device.type == "cuda",
         device=device
     )
 
@@ -325,6 +367,7 @@ def main():
         world_model=world_model,
         agent=agent,
         logger=logger,
+        device=device,
         wandb_run=wandb_run
     )
 
