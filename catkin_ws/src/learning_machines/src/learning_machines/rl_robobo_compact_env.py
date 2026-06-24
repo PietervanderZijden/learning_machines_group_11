@@ -62,6 +62,8 @@ class RoboboCompactEnvConfig:
     blob_track_max_missed: int = 6
     active_food_count: int | None = None
     randomize_push_layout: bool = True
+    push_curriculum_stage: int = 2
+    push_goal_jitter_radius: float = 0.20
     push_arena_radius: float = 0.90
     push_min_robot_distance: float = 0.35
     push_min_block_goal_distance: float = 0.35
@@ -180,6 +182,9 @@ class RoboboCompactEnv(gym.Env):
         self._red_block_z = 0.025
         self._green_goal_z = 0.005
         self._push_layout_randomized = False
+        self._push_layout_mode = "full"
+        self._authored_red_block_pose: tuple[float, float, float] | None = None
+        self._authored_green_goal_pose: tuple[float, float, float] | None = None
         self._previous_block_goal_distance: float | None = None
         self._previous_push_potential: float | None = None
         self._blob_track_missed = 0
@@ -655,6 +660,11 @@ class RoboboCompactEnv(gym.Env):
             self._green_goal_z = float(goal[2])
         except Exception:
             pass
+        if getattr(self, "_authored_red_block_pose", None) is None:
+            block = sim.getObjectPosition(self._red_block_handle, sim.handle_world)
+            goal = sim.getObjectPosition(self._green_goal_handle, sim.handle_world)
+            self._authored_red_block_pose = tuple(float(value) for value in block)
+            self._authored_green_goal_pose = tuple(float(value) for value in goal)
 
     def _sample_push_point(self) -> tuple[float, float]:
         angle = random.uniform(0.0, 2.0 * math.pi)
@@ -679,6 +689,9 @@ class RoboboCompactEnv(gym.Env):
         goal_xy: tuple[float, float],
     ) -> bool:
         robot_xy = (self._initial_pos_x, self._initial_pos_y)
+        for point in (block_xy, goal_xy):
+            if self._xy_distance(point, (self._arena_cx, self._arena_cy)) > self.config.push_arena_radius:
+                return False
         if self._xy_distance(block_xy, robot_xy) < self.config.push_min_robot_distance:
             return False
         if self._xy_distance(goal_xy, robot_xy) < self.config.push_min_robot_distance:
@@ -702,9 +715,49 @@ class RoboboCompactEnv(gym.Env):
 
     def _randomize_push_layout(self) -> None:
         self._push_layout_randomized = False
-        if not self.config.randomize_push_layout or not self._push_handles_are_valid():
+        if not self._push_handles_are_valid():
+            return
+        stage = int(self.config.push_curriculum_stage)
+        if stage not in (0, 1, 2):
+            raise ValueError("push curriculum stage must be 0, 1, or 2")
+        if not self.config.randomize_push_layout:
+            stage = 0
+        if (
+            getattr(self, "_authored_red_block_pose", None) is None
+            or getattr(self, "_authored_green_goal_pose", None) is None
+        ):
+            self._cache_push_object_heights()
+        authored_block = self._authored_red_block_pose
+        authored_goal = self._authored_green_goal_pose
+        if authored_block is None or authored_goal is None:
+            return
+        block_xy = (authored_block[0], authored_block[1])
+        goal_xy = (authored_goal[0], authored_goal[1])
+
+        if stage == 0:
+            self._push_layout_mode = "fixed"
+            self._set_push_object_pose(self._red_block_handle, block_xy, authored_block[2])
+            self._set_push_object_pose(self._green_goal_handle, goal_xy, authored_goal[2])
             return
 
+        if stage == 1:
+            self._push_layout_mode = "goal_jitter"
+            for _ in range(100):
+                angle = random.uniform(0.0, 2.0 * math.pi)
+                radius = self.config.push_goal_jitter_radius * math.sqrt(random.random())
+                candidate_goal = (
+                    goal_xy[0] + radius * math.cos(angle),
+                    goal_xy[1] + radius * math.sin(angle),
+                )
+                if self._valid_push_layout(block_xy, candidate_goal):
+                    goal_xy = candidate_goal
+                    break
+            self._set_push_object_pose(self._red_block_handle, block_xy, authored_block[2])
+            self._set_push_object_pose(self._green_goal_handle, goal_xy, authored_goal[2])
+            self._push_layout_randomized = True
+            return
+
+        self._push_layout_mode = "full"
         block_xy = goal_xy = None
         for _ in range(100):
             candidate_goal = self._sample_push_point()
@@ -715,15 +768,20 @@ class RoboboCompactEnv(gym.Env):
                 break
 
         if block_xy is None or goal_xy is None:
-            # Deterministic fallback that is solvable and not already successful.
-            block_xy = (
-                self._arena_cx - self.config.push_min_block_goal_distance,
-                self._arena_cy,
+            # Deterministic constrained fallback.
+            radii = np.linspace(
+                self.config.push_min_robot_distance,
+                self.config.push_arena_radius,
+                12,
             )
-            goal_xy = (
-                self._arena_cx + self.config.push_min_block_goal_distance,
-                self._arena_cy,
-            )
+            for radius in radii:
+                candidate_block = (self._arena_cx - radius, self._arena_cy)
+                candidate_goal = (self._arena_cx + radius, self._arena_cy)
+                if self._valid_push_layout(candidate_block, candidate_goal):
+                    block_xy, goal_xy = candidate_block, candidate_goal
+                    break
+        if block_xy is None or goal_xy is None:
+            raise RuntimeError("push layout constraints have no valid full-stage layout")
 
         self._set_push_object_pose(self._red_block_handle, block_xy, self._red_block_z)
         self._set_push_object_pose(self._green_goal_handle, goal_xy, self._green_goal_z)
@@ -1100,6 +1158,8 @@ class RoboboCompactEnv(gym.Env):
             "red_block_visible": red_visible,
             "green_goal_visible": green_visible,
             "push_layout_randomized": float(self._push_layout_randomized),
+            "push_layout_mode": getattr(self, "_push_layout_mode", "full"),
+            "curriculum_stage": float(self.config.push_curriculum_stage),
         }
 
     def _push_reward(
@@ -1125,20 +1185,12 @@ class RoboboCompactEnv(gym.Env):
         previous_potential = self._previous_push_potential
         if previous_potential is None:
             previous_potential = potential
-        next_potential = 0.0 if success else potential
-        potential_shaping = (
-            self.config.push_discount * next_potential - previous_potential
-        )
+        potential_shaping = 0.0
         self._previous_push_potential = potential
-        time_cost = max(0.0, elapsed_delta_seconds) * self.config.push_time_penalty_per_second
-        collision_cost = self.config.collision_penalty if collision else 0.0
-        action_change_cost = self.config.push_action_change_penalty * max(0.0, action_change)
-        reward = (
-            potential_shaping
-            - time_cost
-            - collision_cost
-            - action_change_cost
-        )
+        time_cost = 0.0
+        collision_cost = 0.0
+        action_change_cost = 0.0
+        reward = float(success)
         robot, block, goal = geometry
         block_goal_distance = self._geometry_block_goal_distance(geometry)
         if block_goal_distance > 1e-9:

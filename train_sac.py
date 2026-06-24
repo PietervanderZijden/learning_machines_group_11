@@ -27,10 +27,7 @@ import numpy as np
 from gymnasium import spaces
 
 SAC_GAMMA = 0.9801
-PUSH_REWARD_CONTRACT = "robobo-push-dense-v3"
-PUSH_BLOCK_GOAL_WEIGHT = 20.0
-PUSH_ROBOT_POSE_WEIGHT = 10.0
-PUSH_STANDOFF_DISTANCE = 0.22
+PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
 
 
 def _save_episode_atomic(path: Path, data: dict[str, np.ndarray]) -> None:
@@ -120,13 +117,15 @@ class RoboboSACEnv(gym.Env):
         time_penalty_per_second=2.5,
         collision_penalty=0.0,
         action_change_penalty=0.0,
-        reward_scale=0.01,
         emergency_override_penalty=0.0,
         calibration_path=None,
         curriculum=True,
-        curriculum_one_food_steps=100_000,
-        curriculum_three_food_steps=250_000,
-        randomization_start_steps=300_000,
+        curriculum_start_stage=0,
+        curriculum_success_threshold=0.80,
+        curriculum_window=100,
+        curriculum_min_stage_steps=20_000,
+        curriculum_goal_jitter_radius=0.20,
+        curriculum_state_path=None,
         image_size=64,
         record_dir="recorded_episodes",
         no_record=False,
@@ -136,21 +135,37 @@ class RoboboSACEnv(gym.Env):
             RoboboCompactEnv,
             RoboboCompactEnvConfig,
         )
+        from learning_machines.push_curriculum import (
+            PushCurriculumConfig,
+            PushCurriculumController,
+        )
+
+        curriculum_config = PushCurriculumConfig(
+            enabled=curriculum,
+            start_stage=curriculum_start_stage,
+            success_threshold=curriculum_success_threshold,
+            window=curriculum_window,
+            min_stage_steps=curriculum_min_stage_steps,
+            goal_jitter_radius=curriculum_goal_jitter_radius,
+        )
+        self._curriculum_state_path = (
+            Path(curriculum_state_path) if curriculum_state_path else None
+        )
+        if self._curriculum_state_path is not None and self._curriculum_state_path.exists():
+            self.curriculum_controller = PushCurriculumController.load(
+                self._curriculum_state_path, curriculum_config
+            )
+        else:
+            self.curriculum_controller = PushCurriculumController(curriculum_config)
 
         self._config = RoboboCompactEnvConfig(
             task="push",
             max_episode_steps=max_episode_steps,
             randomize_food_positions=randomize_food_positions,
             randomize_push_layout=randomize_push_layout,
-            time_penalty_per_second=time_penalty_per_second,
-            push_time_penalty_per_second=time_penalty_per_second,
-            collision_penalty=collision_penalty,
-            action_change_penalty=action_change_penalty,
-            push_action_change_penalty=action_change_penalty,
+            push_curriculum_stage=self.curriculum_controller.stage,
+            push_goal_jitter_radius=curriculum_goal_jitter_radius,
             push_discount=SAC_GAMMA,
-            push_block_goal_weight=PUSH_BLOCK_GOAL_WEIGHT,
-            push_robot_pose_weight=PUSH_ROBOT_POSE_WEIGHT,
-            push_standoff_distance=PUSH_STANDOFF_DISTANCE,
             calibration_path=calibration_path,
             return_image=not no_record,
             image_obs_size=(image_size, image_size),
@@ -161,17 +176,14 @@ class RoboboSACEnv(gym.Env):
         if domain_randomization:
             from learning_machines.domain_randomization import DomainRandomizationWrapper
             self._domain_wrapper = DomainRandomizationWrapper(
-                inner, enabled=not curriculum, ranges=randomization_ranges
+                inner,
+                enabled=self.curriculum_controller.stage == 2,
+                ranges=randomization_ranges,
             )
             inner = self._domain_wrapper
         self._inner = inner
-        self.curriculum = bool(curriculum)
-        self.curriculum_one_food_steps = int(curriculum_one_food_steps)
-        self.curriculum_three_food_steps = int(curriculum_three_food_steps)
-        self.randomization_start_steps = int(randomization_start_steps)
+        self._domain_randomization_configured = bool(domain_randomization)
         self._previous_executed_action = np.zeros(2, dtype=np.float32)
-        self.reward_scale = float(reward_scale)
-        self.emergency_override_penalty = float(emergency_override_penalty)
         self.observation_space = spaces.Box(
             low=-1.0, high=1.0, shape=(18,), dtype=np.float32,
         )
@@ -203,16 +215,15 @@ class RoboboSACEnv(gym.Env):
             [red_block, green_goal, ir, self._previous_executed_action]
         ).astype(np.float32)
 
-    def set_curriculum_step(self, step: int) -> dict[str, float]:
-        if not self.curriculum:
-            return {"push_task": 1.0, "randomization_enabled": 1.0}
-        randomization_enabled = step >= self.randomization_start_steps
+    def _apply_curriculum(self) -> dict:
+        stage = self.curriculum_controller.stage
+        self._config.push_curriculum_stage = stage
+        randomization_enabled = self._domain_randomization_configured and stage == 2
         if self._domain_wrapper is not None:
             self._domain_wrapper.enabled = randomization_enabled
-        return {
-            "push_task": 1.0,
-            "randomization_enabled": float(randomization_enabled),
-        }
+        metrics = self.curriculum_controller.metrics()
+        metrics["randomization_enabled"] = float(randomization_enabled)
+        return metrics
 
     def _get_push_success(self, info):
         return float(info.get("push_success", 0.0))
@@ -227,6 +238,13 @@ class RoboboSACEnv(gym.Env):
             "dones": np.array(self._episode_dones, dtype=bool),
             "observation_contract": np.array("robobo-push-obs-v1"),
             "reward_contract": np.array(PUSH_REWARD_CONTRACT),
+            "curriculum_stage": np.array(self._episode_curriculum_stage),
+            "curriculum_stage_name": np.array(
+                ("fixed", "goal_jitter", "full")[self._episode_curriculum_stage]
+            ),
+            "push_layout_mode": np.array(
+                getattr(self._base_env, "_push_layout_mode", "full")
+            ),
             "control_interval_seconds": np.array(0.4),
             "calibration_profile": np.array(
                 self._base_env.observation_adapter.profile.name
@@ -240,6 +258,8 @@ class RoboboSACEnv(gym.Env):
         self._episode_count += 1
 
     def reset(self, *, seed=None, options=None):
+        self._apply_curriculum()
+        self._episode_curriculum_stage = self.curriculum_controller.stage
         obs_dict, info = self._inner.reset(seed=seed, options=options)
         self._previous_executed_action.fill(0.0)
         if self._record:
@@ -269,16 +289,27 @@ class RoboboSACEnv(gym.Env):
         info.setdefault("robot_push_pose_distance", float("nan"))
         info.setdefault(
             "time_cost",
-            self._config.time_penalty_per_second * self._config.step_millis / 1000.0,
+            0.0,
         )
         info.setdefault("collision_penalty", 0.0)
-        emergency_cost = (
-            self.emergency_override_penalty
-            if info.get("safety_override") == "emergency_reverse_turn"
-            else 0.0
-        )
-        unscaled_training_reward = float(raw_reward) - emergency_cost
-        training_reward = self.reward_scale * unscaled_training_reward
+        training_reward = float(raw_reward)
+        self.curriculum_controller.record_transition()
+        promotion = None
+        episode_stage = self._episode_curriculum_stage
+        if terminated or truncated:
+            promotion = self.curriculum_controller.record_episode(bool(push_success))
+            if promotion is not None:
+                stage_steps = float(promotion["stage_steps"])
+                stage_episodes = float(promotion["episodes"])
+                stage_success = float(promotion["success_rate"])
+            else:
+                stage_steps = float(self.curriculum_controller.stage_steps)
+                stage_episodes = float(len(self.curriculum_controller.recent_outcomes))
+                stage_success = self.curriculum_controller.rolling_success
+            if promotion is not None:
+                self._apply_curriculum()
+            if self._curriculum_state_path is not None:
+                self.curriculum_controller.save(self._curriculum_state_path)
         if self._record:
             self._episode_actions.append(executed_action)
             self._episode_rewards.append(float(raw_reward))
@@ -288,12 +319,35 @@ class RoboboSACEnv(gym.Env):
                 self._episode_irs.append(obs_dict["ir"].astype(np.float32).copy())
             if terminated or truncated:
                 self._save_episode()
-        info["safety_override_penalty"] = emergency_cost
-        info["unscaled_training_reward"] = unscaled_training_reward
         info["training_reward"] = training_reward
+        info.update({
+            "curriculum_stage": float(self.curriculum_controller.stage),
+            "curriculum_stage_name": self.curriculum_controller.stage_name,
+            "episode_curriculum_stage": float(episode_stage),
+            "curriculum_stage_steps": (
+                stage_steps if terminated or truncated
+                else float(self.curriculum_controller.stage_steps)
+            ),
+            "curriculum_stage_episodes": (
+                stage_episodes if terminated or truncated
+                else float(len(self.curriculum_controller.recent_outcomes))
+            ),
+            "curriculum_rolling_success": (
+                stage_success if terminated or truncated
+                else self.curriculum_controller.rolling_success
+            ),
+            "domain_randomization_enabled": float(
+                self._domain_wrapper is not None and self._domain_wrapper.enabled
+            ),
+            "curriculum_promoted": float(promotion is not None),
+        })
+        if promotion is not None:
+            info["curriculum_promotion"] = promotion
         return obs, training_reward, terminated, truncated, info
 
     def close(self):
+        if self._curriculum_state_path is not None:
+            self.curriculum_controller.save(self._curriculum_state_path)
         self._inner.close()
 
 
@@ -307,12 +361,6 @@ def main():
         default=os.environ.get("COPPELIA_SIM_IP", "127.0.0.1"),
     )
     parser.add_argument("--max-episode-steps", type=int, default=200)
-    parser.add_argument(
-        "--push-layout-randomization",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Randomize red block and green goal positions on each simulator reset.",
-    )
     parser.add_argument("--image-size", type=int, default=64,
                         help="Image size for recorded episodes (default: 64x64)")
     parser.add_argument("--record-dir", type=str, default="recorded_episodes",
@@ -324,17 +372,6 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--buffer-size", type=int, default=1_000_000)
-    parser.add_argument(
-        "--time-penalty-per-second",
-        type=float,
-        default=2.5,
-        help="Elapsed-time cost; 2.5/s equals 1.0 per 400 ms transition",
-    )
-    parser.add_argument("--collision-penalty", type=float, default=0.0,
-                        help="Additional dense reward penalty when front IR indicates collision")
-    parser.add_argument("--action-change-penalty", type=float, default=0.0)
-    parser.add_argument("--reward-scale", type=float, default=0.01)
-    parser.add_argument("--emergency-override-penalty", type=float, default=0.0)
     parser.add_argument("--entropy-coefficient", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--calibration", default="config/calibration/simulation.json")
@@ -356,9 +393,11 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument("--curriculum-one-food-steps", type=int, default=100_000)
-    parser.add_argument("--curriculum-three-food-steps", type=int, default=250_000)
-    parser.add_argument("--randomization-start-steps", type=int, default=300_000)
+    parser.add_argument("--curriculum-start-stage", type=int, choices=(0, 1, 2), default=0)
+    parser.add_argument("--curriculum-success-threshold", type=float, default=0.80)
+    parser.add_argument("--curriculum-window", type=int, default=100)
+    parser.add_argument("--curriculum-min-stage-steps", type=int, default=20_000)
+    parser.add_argument("--curriculum-goal-jitter-radius", type=float, default=0.20)
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent
@@ -384,6 +423,12 @@ def main():
         from learning_machines.transfer import CheckpointManifest
 
         existing_manifest = CheckpointManifest.load(existing_manifest_path)
+        if existing_manifest.reward_contract != PUSH_REWARD_CONTRACT:
+            raise ValueError(
+                f"{checkpoint_dir} uses reward contract "
+                f"{existing_manifest.reward_contract}; sparse push training requires "
+                "a fresh checkpoint directory"
+            )
         existing_dim = existing_manifest.algorithm_config.get("observation_dim")
         if existing_dim != 18:
             raise ValueError(
@@ -396,6 +441,12 @@ def main():
                 f"{checkpoint_dir} already contains SAC checkpoints. "
                 "Pass --resume or choose a fresh checkpoint directory."
             )
+    curriculum_state_path = checkpoint_dir / "curriculum_state.json"
+    if curriculum_state_path.exists() and not args.resume:
+        raise ValueError(
+            f"{checkpoint_dir} already contains curriculum state. "
+            "Pass --resume or choose a fresh checkpoint directory."
+        )
 
     log_dir = checkpoint_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -457,15 +508,14 @@ def main():
     class TransferMetricsCallback(BaseCallback):
         def __init__(self):
             super().__init__()
-            self.episode_food = deque(maxlen=100)
-            self.best_food_mean = float("-inf")
+            self.best_stage = -1
+            self.best_success_rate = float("-inf")
             best_path = checkpoint_dir / "best_metrics.json"
             if best_path.exists():
                 try:
                     data = json.loads(best_path.read_text())
-                    self.best_food_mean = float(
-                        data.get("rolling_success_rate", data.get("rolling_food_mean"))
-                    )
+                    self.best_stage = int(data.get("curriculum_stage", -1))
+                    self.best_success_rate = float(data["rolling_success_rate"])
                 except (
                     OSError,
                     KeyError,
@@ -476,35 +526,63 @@ def main():
                     pass
 
         def _on_step(self) -> bool:
-            curriculum_metrics = {}
-            base_env = self.training_env.envs[0].unwrapped
-            if hasattr(base_env, "set_curriculum_step"):
-                curriculum_metrics = base_env.set_curriculum_step(
-                    self.num_timesteps
-                )
             infos = self.locals.get("infos", [])
             if not infos:
                 return True
             info = infos[0]
             dones = self.locals.get("dones", [])
             if len(dones) and bool(dones[0]):
-                self.episode_food.append(float(info.get("push_success", 0.0)))
-                if len(self.episode_food) >= 20:
-                    rolling_success = float(np.mean(self.episode_food))
-                    if rolling_success > self.best_food_mean:
-                        self.best_food_mean = rolling_success
-                        self.model.save(str(checkpoint_dir / "sac_best"))
-                        (checkpoint_dir / "best_metrics.json").write_text(
-                            json.dumps(
-                                {
-                                    "global_step": self.num_timesteps,
-                                    "rolling_episodes": len(self.episode_food),
-                                    "rolling_success_rate": rolling_success,
-                                },
-                                indent=2,
-                            )
-                            + "\n"
+                stage = int(
+                    info.get(
+                        "episode_curriculum_stage",
+                        info.get("curriculum_stage", 2),
+                    )
+                )
+                rolling_success = float(info.get("curriculum_rolling_success", 0.0))
+                stage_episodes = int(info.get("curriculum_stage_episodes", 0))
+                if stage_episodes:
+                    stage_metrics_path = checkpoint_dir / f"best_metrics_stage_{stage}.json"
+                    previous_stage_rate = float("-inf")
+                    if stage_metrics_path.exists():
+                        previous_stage_rate = float(
+                            json.loads(stage_metrics_path.read_text())["rolling_success_rate"]
                         )
+                    if rolling_success > previous_stage_rate:
+                        self.model.save(str(checkpoint_dir / f"sac_best_stage_{stage}"))
+                        stage_metrics_path.write_text(json.dumps({
+                            "global_step": self.num_timesteps,
+                            "curriculum_stage": stage,
+                            "rolling_episodes": stage_episodes,
+                            "rolling_success_rate": rolling_success,
+                        }, indent=2) + "\n")
+                if (stage, rolling_success) > (self.best_stage, self.best_success_rate):
+                    self.best_stage = stage
+                    self.best_success_rate = rolling_success
+                    self.model.save(str(checkpoint_dir / "sac_best"))
+                    (checkpoint_dir / "best_metrics.json").write_text(
+                        json.dumps(
+                            {
+                                "global_step": self.num_timesteps,
+                                "curriculum_stage": stage,
+                                "rolling_episodes": stage_episodes,
+                                "rolling_success_rate": rolling_success,
+                            },
+                            indent=2,
+                        )
+                        + "\n"
+                    )
+                if info.get("curriculum_promoted"):
+                    promoted_stage = int(info["curriculum_stage"])
+                    self.model.save(
+                        str(checkpoint_dir / f"sac_promotion_stage_{promoted_stage}")
+                    )
+                    self.model.save_replay_buffer(
+                        str(checkpoint_dir / f"sac_promotion_replay_stage_{promoted_stage}.pkl")
+                    )
+                    print(
+                        f"Promoted push curriculum to stage {promoted_stage} "
+                        f"({info.get('curriculum_stage_name')}); checkpoint saved"
+                    )
             metrics = {
                 "rollout/elapsed_seconds": info.get("elapsed_seconds"),
                 "rollout/push_success": info.get("push_success"),
@@ -525,20 +603,15 @@ def main():
                 "rollout/time_cost": info.get("time_cost"),
                 "rollout/collision_penalty": info.get("collision_penalty"),
                 "rollout/action_change_penalty": info.get("action_change_penalty"),
-                "rollout/safety_override_penalty": info.get("safety_override_penalty"),
-                "rollout/unscaled_training_reward": info.get("unscaled_training_reward"),
                 "rollout/training_reward": info.get("training_reward"),
                 "rollout/safety_with_visible_block": info.get(
                     "safety_with_visible_block"
                 ),
-                "curriculum/push_task": curriculum_metrics.get("push_task"),
-                "curriculum/randomization_enabled": curriculum_metrics.get(
-                    "randomization_enabled"
-                ),
-                "rollout/success_rate_100": (
-                    float(np.mean(self.episode_food))
-                    if self.episode_food else None
-                ),
+                "curriculum/stage": info.get("curriculum_stage"),
+                "curriculum/stage_steps": info.get("curriculum_stage_steps"),
+                "curriculum/stage_episodes": info.get("curriculum_stage_episodes"),
+                "curriculum/rolling_success": info.get("curriculum_rolling_success"),
+                "curriculum/randomization_enabled": info.get("domain_randomization_enabled"),
             }
             metrics = {key: float(value) for key, value in metrics.items() if value is not None}
             for key, value in metrics.items():
@@ -546,6 +619,12 @@ def main():
             if wandb_run is not None and self.num_timesteps % 20 == 0:
                 payload = dict(metrics)
                 payload["global_step"] = self.num_timesteps
+                payload["curriculum/stage_name"] = info.get(
+                    "curriculum_stage_name"
+                )
+                payload["curriculum/object_randomization_mode"] = info.get(
+                    "push_layout_mode"
+                )
                 for key, value in self.model.logger.name_to_value.items():
                     if key.startswith("train/") and isinstance(value, (int, float, np.number)):
                         payload[key] = float(value)
@@ -591,19 +670,17 @@ def main():
         RoboboSACEnv(
             max_episode_steps=args.max_episode_steps,
             randomize_food_positions=False,
-            randomize_push_layout=args.push_layout_randomization,
+            randomize_push_layout=True,
             domain_randomization=args.domain_randomization,
             randomization_ranges=randomization_ranges,
-            time_penalty_per_second=args.time_penalty_per_second,
-            collision_penalty=args.collision_penalty,
-            action_change_penalty=args.action_change_penalty,
-            reward_scale=args.reward_scale,
-            emergency_override_penalty=args.emergency_override_penalty,
             calibration_path=args.calibration,
             curriculum=args.curriculum,
-            curriculum_one_food_steps=args.curriculum_one_food_steps,
-            curriculum_three_food_steps=args.curriculum_three_food_steps,
-            randomization_start_steps=args.randomization_start_steps,
+            curriculum_start_stage=args.curriculum_start_stage,
+            curriculum_success_threshold=args.curriculum_success_threshold,
+            curriculum_window=args.curriculum_window,
+            curriculum_min_stage_steps=args.curriculum_min_stage_steps,
+            curriculum_goal_jitter_radius=args.curriculum_goal_jitter_radius,
+            curriculum_state_path=curriculum_state_path,
             image_size=args.image_size,
             record_dir=args.record_dir,
             no_record=args.no_record,
@@ -623,9 +700,13 @@ def main():
             "time_cost",
             "collision_penalty",
             "action_change_penalty",
-            "safety_override_penalty",
-            "unscaled_training_reward",
             "training_reward",
+            "curriculum_stage",
+            "episode_curriculum_stage",
+            "curriculum_stage_steps",
+            "curriculum_stage_episodes",
+            "curriculum_rolling_success",
+            "domain_randomization_enabled",
             "elapsed_seconds",
             "collisions",
             "safety_overrides",
@@ -680,17 +761,15 @@ def main():
         required = {
             "observation_dim": 18,
             "task": "push",
-            "reward_scale": args.reward_scale,
-            "emergency_override_penalty": args.emergency_override_penalty,
             "entropy_coefficient": args.entropy_coefficient,
             "max_grad_norm": args.max_grad_norm,
             "curriculum": args.curriculum,
-            "push_layout_randomization": args.push_layout_randomization,
             "max_episode_steps": args.max_episode_steps,
             "gamma": SAC_GAMMA,
-            "push_block_goal_weight": PUSH_BLOCK_GOAL_WEIGHT,
-            "push_robot_pose_weight": PUSH_ROBOT_POSE_WEIGHT,
-            "push_standoff_distance": PUSH_STANDOFF_DISTANCE,
+            "curriculum_success_threshold": args.curriculum_success_threshold,
+            "curriculum_window": args.curriculum_window,
+            "curriculum_min_stage_steps": args.curriculum_min_stage_steps,
+            "curriculum_goal_jitter_radius": args.curriculum_goal_jitter_radius,
         }
         if manifest.reward_contract != PUSH_REWARD_CONTRACT:
             raise ValueError(
@@ -803,25 +882,19 @@ def main():
                 "buffer_size": args.buffer_size,
                 "observation_dim": 18,
                 "task": "push",
-                "push_layout_randomization": args.push_layout_randomization,
                 "domain_randomization": args.domain_randomization,
                 "hardware_calibration": args.hardware_calibration,
-                "time_penalty_per_second": args.time_penalty_per_second,
-                "collision_penalty": args.collision_penalty,
-                "action_change_penalty": args.action_change_penalty,
-                "reward_scale": args.reward_scale,
-                "emergency_override_penalty": args.emergency_override_penalty,
                 "entropy_coefficient": args.entropy_coefficient,
                 "max_grad_norm": args.max_grad_norm,
                 "gamma": SAC_GAMMA,
                 "max_episode_steps": args.max_episode_steps,
-                "push_block_goal_weight": PUSH_BLOCK_GOAL_WEIGHT,
-                "push_robot_pose_weight": PUSH_ROBOT_POSE_WEIGHT,
-                "push_standoff_distance": PUSH_STANDOFF_DISTANCE,
                 "curriculum": args.curriculum,
-                "curriculum_one_food_steps": args.curriculum_one_food_steps,
-                "curriculum_three_food_steps": args.curriculum_three_food_steps,
-                "randomization_start_steps": args.randomization_start_steps,
+                "curriculum_stage": env.unwrapped.curriculum_controller.stage,
+                "curriculum_stage_name": env.unwrapped.curriculum_controller.stage_name,
+                "curriculum_success_threshold": args.curriculum_success_threshold,
+                "curriculum_window": args.curriculum_window,
+                "curriculum_min_stage_steps": args.curriculum_min_stage_steps,
+                "curriculum_goal_jitter_radius": args.curriculum_goal_jitter_radius,
             },
         ).save(checkpoint_dir / "manifest.json")
         if wandb_run is not None:

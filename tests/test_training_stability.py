@@ -4,20 +4,27 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from learning_machines.dreamerv3.actor_critic import Actor
-from learning_machines.dreamerv3.dreamerv3 import green_saliency_loss
-from learning_machines.dreamerv3.optim import LaProp, adaptive_clip_grad_
 from learning_machines.coppelia_startup import check_coppelia_service
-from train_dreamerv3 import dreamer_updates_per_env_step
 from train_sac import RoboboSACEnv
 
+try:
+    from learning_machines.dreamerv3.actor_critic import Actor
+    from learning_machines.dreamerv3.dreamerv3 import green_saliency_loss
+    from learning_machines.dreamerv3.optim import LaProp, adaptive_clip_grad_
+    from train_dreamerv3 import dreamer_updates_per_env_step
+    DREAMER_AVAILABLE = True
+except ImportError:
+    DREAMER_AVAILABLE = False
 
+
+@pytest.mark.skipif(not DREAMER_AVAILABLE, reason="DreamerV3 is not on this branch")
 def test_dreamer_replay_ratio_converts_transitions_to_update_frequency():
     assert dreamer_updates_per_env_step(512, 32, 50) == pytest.approx(0.32)
     with pytest.raises(ValueError):
         dreamer_updates_per_env_step(-1, 32, 50)
 
 
+@pytest.mark.skipif(not DREAMER_AVAILABLE, reason="DreamerV3 is not on this branch")
 def test_dreamerv3_actor_mean_and_std_are_bounded():
     actor = Actor(
         state_dim=4,
@@ -38,6 +45,7 @@ def test_dreamerv3_actor_mean_and_std_are_bounded():
     assert actor.std(state).max().item() <= 1.0 + 1e-6
 
 
+@pytest.mark.skipif(not DREAMER_AVAILABLE, reason="DreamerV3 is not on this branch")
 def test_dreamerv3_agc_clips_relative_to_parameter_scale():
     parameter = torch.nn.Parameter(torch.ones(2, 2))
     parameter.grad = torch.full_like(parameter, 100.0)
@@ -48,6 +56,7 @@ def test_dreamerv3_agc_clips_relative_to_parameter_scale():
     assert torch.all(gradient_norm <= 0.3 * parameter_norm + 1e-6)
 
 
+@pytest.mark.skipif(not DREAMER_AVAILABLE, reason="DreamerV3 is not on this branch")
 def test_laprop_warmup_and_state_round_trip():
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
     optimizer = LaProp([parameter], lr=0.1, warmup_steps=2)
@@ -65,6 +74,7 @@ def test_laprop_warmup_and_state_round_trip():
     assert restored_parameter.item() < first.item()
 
 
+@pytest.mark.skipif(not DREAMER_AVAILABLE, reason="DreamerV3 is not on this branch")
 def test_dreamerv3_agc_rejects_non_finite_gradients():
     parameter = torch.nn.Parameter(torch.ones(1))
     parameter.grad = torch.tensor([float("inf")])
@@ -86,6 +96,7 @@ def test_sac_observation_includes_previous_executed_action():
     assert obs[-2:].tolist() == pytest.approx([0.25, -0.5])
 
 
+@pytest.mark.skipif(not DREAMER_AVAILABLE, reason="DreamerV3 is not on this branch")
 def test_green_saliency_loss_penalizes_missing_push_object_pixels():
     target = torch.zeros(1, 1, 3, 8, 8)
     target[..., 0, 2:4, 2:4] = 1.0
