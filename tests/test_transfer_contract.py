@@ -128,6 +128,28 @@ def test_action_smoothing_rate_limit_and_pre_action_safety():
     assert np.any(emergency < 0)
 
 
+def test_action_executor_can_apply_direct_actions_without_safety():
+    executor = ActionExecutor(
+        smoothing=SmoothingConfig(0.0, 1.0, 2.0),
+        safety_enabled=False,
+    )
+    critical_ir = np.ones(8, dtype=np.float32)
+
+    first, first_info = executor.execute(
+        np.array([1.0, -1.0], dtype=np.float32),
+        critical_ir,
+    )
+    second, second_info = executor.execute(
+        np.array([-1.0, 1.0], dtype=np.float32),
+        critical_ir,
+    )
+
+    np.testing.assert_allclose(first, [1.0, -1.0])
+    np.testing.assert_allclose(second, [-1.0, 1.0])
+    assert first_info["safety_override"] is None
+    assert second_info["safety_override"] is None
+
+
 def test_safety_allows_slow_approach_to_centered_food():
     executor = ActionExecutor(
         smoothing=SmoothingConfig(0.0, 1.0, 1.0),
@@ -544,6 +566,34 @@ def test_dense_push_reward_values_approach_and_block_progress():
     assert push_info["potential_shaping"] > 0.0
     assert approach_reward > -1.0
     assert push_reward > -1.0
+
+
+def test_dense_push_v3_weights_amplify_progress_signal_tenfold():
+    start = ((-0.50, 0.0), (0.0, 0.0), (1.0, 0.0))
+    approach = ((-0.30, 0.0), (0.0, 0.0), (1.0, 0.0))
+    baseline = _dense_push_env(
+        start,
+        push_block_goal_weight=2.0,
+        push_robot_pose_weight=1.0,
+    )
+    baseline._push_geometry = lambda: approach
+    _, _, baseline_info = baseline._push_reward(
+        _visible_push_obs(), 0.4, False, 0.0
+    )
+    dense_v3 = _dense_push_env(
+        start,
+        push_block_goal_weight=20.0,
+        push_robot_pose_weight=10.0,
+    )
+    dense_v3._push_geometry = lambda: approach
+    _, _, dense_v3_info = dense_v3._push_reward(
+        _visible_push_obs(), 0.4, False, 0.0
+    )
+
+    assert np.isclose(
+        dense_v3_info["potential_shaping"],
+        10.0 * baseline_info["potential_shaping"],
+    )
 
 
 def test_dense_push_success_terminates_without_explicit_success_bonus():

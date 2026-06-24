@@ -227,6 +227,36 @@ def test_reference_wrapper_distinguishes_timeout_from_terminal_discount():
     assert terminal_info["discount"] == 0.0
 
 
+def test_reference_wrapper_reports_executed_action_spin_diagnostics():
+    class FakeEnv(gym.Env):
+        action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+
+        def step(self, action):
+            obs = {
+                "image": np.zeros((3, 64, 64), dtype=np.uint8),
+                "ir": np.zeros(8, dtype=np.float32),
+            }
+            info = {
+                "requested_action": np.array([1.0, -1.0], dtype=np.float32),
+                "executed_action": np.array([1.0, -1.0], dtype=np.float32),
+                "block_goal_distance": 0.75,
+                "potential_shaping": 0.4,
+                "time_cost": 1.0,
+            }
+            return obs, -0.6, False, False, info
+
+    wrapper = RoboboNM512Wrapper(FakeEnv())
+    obs, _, _, _ = wrapper.step(np.array([1.0, -1.0], dtype=np.float32))
+
+    assert obs["log_avg_opposite_wheels"] == 1.0
+    assert obs["log_max_spin_sequence"] == 1.0
+    assert obs["log_avg_wheel_saturation"] == 1.0
+    assert obs["log_avg_action_execution_error"] == 0.0
+    assert obs["log_avg_block_goal_distance"] == 0.75
+    assert np.isclose(obs["log_sum_potential_shaping"], 0.4)
+    assert obs["log_sum_time_cost"] == 1.0
+
+
 def test_v3_replay_balances_sparse_reward_event_sequences():
     np.random.seed(4)
     buffer = ReplayBuffer(

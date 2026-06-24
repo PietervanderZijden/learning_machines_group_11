@@ -55,6 +55,7 @@ class RoboboCompactEnvConfig:
     time_penalty_per_second: float = 0.5
     action_change_penalty: float = 0.02
     action_smoothing: bool = True
+    pre_action_safety: bool = True
     smoothing_previous_weight: float = 0.65
     smoothing_requested_weight: float = 0.35
     max_action_delta: float = 0.5
@@ -162,7 +163,10 @@ class RoboboCompactEnv(gym.Env):
             requested_weight=self.config.smoothing_requested_weight if self.config.action_smoothing else 1.0,
             max_delta=self.config.max_action_delta,
         )
-        self.action_executor = ActionExecutor(smoothing=smoothing)
+        self.action_executor = ActionExecutor(
+            smoothing=smoothing,
+            safety_enabled=self.config.pre_action_safety,
+        )
         self._latest_ir = np.zeros(8, dtype=np.float32)
         self._latest_blob = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
         self._latest_red_block = np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)

@@ -11,11 +11,13 @@ CHECKPOINT_DIR=${CHECKPOINT_DIR:-dreamerv3_models}
 BACKEND=${BACKEND:-custom}
 
 args=("$@")
+passthrough=()
 for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[$i]}" in
         --port)
             if ((i + 1 < ${#args[@]})); then
                 PORT="${args[$((i + 1))]}"
+                ((i += 1))
             fi
             ;;
         --port=*)
@@ -24,6 +26,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
         --host)
             if ((i + 1 < ${#args[@]})); then
                 HOST="${args[$((i + 1))]}"
+                ((i += 1))
             fi
             ;;
         --host=*)
@@ -32,6 +35,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
         --total-steps)
             if ((i + 1 < ${#args[@]})); then
                 TOTAL_STEPS="${args[$((i + 1))]}"
+                ((i += 1))
             fi
             ;;
         --total-steps=*)
@@ -40,18 +44,30 @@ for ((i = 0; i < ${#args[@]}; i++)); do
         --checkpoint-dir)
             if ((i + 1 < ${#args[@]})); then
                 CHECKPOINT_DIR="${args[$((i + 1))]}"
+                ((i += 1))
             fi
             ;;
         --checkpoint-dir=*)
             CHECKPOINT_DIR="${args[$i]#--checkpoint-dir=}"
+            ;;
+        *)
+            passthrough+=("${args[$i]}")
             ;;
     esac
 done
 
 if [ "$BACKEND" = "reference" ]; then
     TRAIN_SCRIPT="train_dreamerv3_reference_push.py"
+    backend_args=(
+        --steps "$TOTAL_STEPS"
+        --logdir "$CHECKPOINT_DIR/dreamerv3-reference"
+    )
 else
     TRAIN_SCRIPT="train_dreamerv3.py"
+    backend_args=(
+        --total-steps "$TOTAL_STEPS"
+        --checkpoint-dir "$CHECKPOINT_DIR"
+    )
 fi
 
 echo "DreamerV3 Training ($BACKEND backend)"
@@ -64,6 +80,5 @@ export PYTHONUNBUFFERED=1
 uv run python -u $TRAIN_SCRIPT \
     --host "$HOST" \
     --port "$PORT" \
-    --total-steps "$TOTAL_STEPS" \
-    --checkpoint-dir "$CHECKPOINT_DIR" \
-    "$@"
+    "${backend_args[@]}" \
+    "${passthrough[@]}"

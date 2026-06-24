@@ -55,7 +55,13 @@ sys.path.insert(
 from rl_robobo_compact_env import RoboboCompactEnv, RoboboCompactEnvConfig
 from robobo_env_wrapper import RoboboNM512Wrapper
 from domain_randomization import DomainRandomizationWrapper, RandomizationRanges
-from learning_machines.reference_checkpoint import collect_optimizer_state_dicts
+from learning_machines.reference_checkpoint import (
+    REFERENCE_CHECKPOINT_VERSION,
+    collect_optimizer_state_dicts,
+    load_optimizer_state_dicts,
+    save_checkpoint_atomic,
+    validate_checkpoint,
+)
 from learning_machines.reference_wandb_media import WandbLogger
 
 import dreamer
@@ -64,7 +70,9 @@ import tools
 from parallel import Damy
 
 
-PUSH_REWARD_CONTRACT = "robobo-push-dense-v2"
+PUSH_REWARD_CONTRACT = "robobo-push-dense-v3"
+PUSH_BLOCK_GOAL_WEIGHT = 20.0
+PUSH_ROBOT_POSE_WEIGHT = 10.0
 
 
 class EpisodeStats:
@@ -100,9 +108,12 @@ def make_robobo_env(config, mode):
         return_image=True,
         image_obs_size=tuple(config.size),
         randomize_push_layout=True,
+        action_smoothing=False,
+        pre_action_safety=False,
+        max_action_delta=2.0,
         push_discount=config.discount,
-        push_block_goal_weight=2.0,
-        push_robot_pose_weight=1.0,
+        push_block_goal_weight=PUSH_BLOCK_GOAL_WEIGHT,
+        push_robot_pose_weight=PUSH_ROBOT_POSE_WEIGHT,
         push_standoff_distance=0.22,
         push_time_penalty_per_second=2.5,
         push_action_change_penalty=0.0,
@@ -221,6 +232,7 @@ def main():
     parser.add_argument("--eval-every", type=int, default=5000)
     parser.add_argument("--log-every", type=int, default=1000)
     parser.add_argument("--eval-episodes", type=int, default=2)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument(
         "--domain-randomization",
@@ -261,35 +273,64 @@ def main():
     logdir = pathlib.Path(config.logdir).expanduser()
     config.traindir = str(logdir / "train_eps")
     config.evaldir = str(logdir / "eval_eps")
-    os.makedirs(config.traindir, exist_ok=True)
     contract_path = logdir / "reward_contract.json"
-    existing_episode_files = list(pathlib.Path(config.traindir).glob("*.npz"))
+    checkpoint_path = logdir / "latest.pt"
     expected_contract = {
         "reward_contract": PUSH_REWARD_CONTRACT,
         "max_episode_steps": config.time_limit,
         "discount": config.discount,
+        "push_block_goal_weight": PUSH_BLOCK_GOAL_WEIGHT,
+        "push_robot_pose_weight": PUSH_ROBOT_POSE_WEIGHT,
+        "action_smoothing": False,
+        "pre_action_safety": False,
+        "max_action_delta": 2.0,
     }
-    if contract_path.exists():
+    checkpoint = None
+    if cli.resume:
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"--resume requires checkpoint {checkpoint_path}"
+            )
+        if not contract_path.exists():
+            raise ValueError(
+                f"--resume requires reward contract {contract_path}"
+            )
         contract = json.loads(contract_path.read_text())
         if contract != expected_contract:
             raise ValueError(
                 f"incompatible reference replay reward contract: {contract}; "
                 "use a fresh --logdir"
             )
-    elif existing_episode_files:
+    elif logdir.exists() and any(logdir.iterdir()):
         raise ValueError(
-            "reference replay has no dense-v2 reward contract; use a fresh --logdir"
+            f"refusing to start a fresh run in non-empty logdir {logdir}; "
+            "use a new --logdir or pass --resume"
         )
+
+    os.makedirs(config.traindir, exist_ok=True)
+    os.makedirs(config.evaldir, exist_ok=True)
     contract_path.parent.mkdir(parents=True, exist_ok=True)
     contract_path.write_text(
         json.dumps(expected_contract, indent=2)
         + "\n"
     )
-    os.makedirs(config.evaldir, exist_ok=True)
 
     tools.set_seed_everywhere(config.seed)
 
     step = dreamer.count_steps(pathlib.Path(config.traindir))
+    if cli.resume:
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        validate_checkpoint(
+            checkpoint,
+            reward_contract=expected_contract,
+            replay_step=step,
+            max_replay_lag=config.time_limit - 1,
+        )
+        step = int(checkpoint["training_step"])
 
     if not cli.no_wandb:
         wandb_init_kwargs = dict(
@@ -301,7 +342,11 @@ def main():
             },
             name=logdir.name,
         )
-        wandb_init_kwargs["resume"] = "allow"
+        if cli.resume and checkpoint.get("wandb_run_id"):
+            wandb_init_kwargs["id"] = checkpoint["wandb_run_id"]
+            wandb_init_kwargs["resume"] = "must"
+        else:
+            wandb_init_kwargs["resume"] = "never"
         wandb.init(**wandb_init_kwargs)
     logger = WandbLogger(
         config.action_repeat * step,
@@ -316,6 +361,13 @@ def main():
     print(f"  Batch: {config.batch_size} x {config.batch_length}")
     print(f"  Eval episodes: {config.eval_episode_num}")
     print(f"  Domain randomization: {config.domain_randomization}")
+    print(f"  Resume: {cli.resume}")
+    print("  Actions: direct (smoothing and pre-action safety disabled)")
+    print(
+        "  Dense weights: "
+        f"block-goal={PUSH_BLOCK_GOAL_WEIGHT}, "
+        f"robot-pose={PUSH_ROBOT_POSE_WEIGHT}"
+    )
 
     train_eps = tools.load_episodes(
         pathlib.Path(config.traindir), limit=config.dataset_size
@@ -345,7 +397,13 @@ def main():
         logprob = random_actor.log_prob(action)
         return {"action": action, "logprob": logprob}, None
 
-    pbar = tqdm(total=config.steps, desc="Training", unit="step", dynamic_ncols=True)
+    pbar = tqdm(
+        total=config.steps,
+        initial=step,
+        desc="Training",
+        unit="step",
+        dynamic_ncols=True,
+    )
     ep_stats = EpisodeStats(window=100)
 
     if prefill > 0:
@@ -380,6 +438,14 @@ def main():
                 train_dataset,
             ).to(config.device)
     agent.requires_grad_(requires_grad=False)
+    if checkpoint is not None:
+        agent.load_state_dict(checkpoint["agent_state_dict"])
+        load_optimizer_state_dicts(agent, checkpoint["optims_state_dict"])
+        agent._should_pretrain._once = False
+        tqdm.write(
+            f"Resumed checkpoint at step {checkpoint['training_step']}."
+        )
+        checkpoint = None
 
     tqdm.write("Start training.")
 
@@ -474,11 +540,14 @@ def main():
         })
 
         items_to_save = {
+            "checkpoint_version": REFERENCE_CHECKPOINT_VERSION,
             "agent_state_dict": agent.state_dict(),
             "optims_state_dict": collect_optimizer_state_dicts(agent),
+            "training_step": agent._step,
+            "reward_contract": expected_contract,
             "wandb_run_id": wandb.run.id if not cli.no_wandb else None,
         }
-        torch.save(items_to_save, logdir / "latest.pt")
+        save_checkpoint_atomic(items_to_save, checkpoint_path)
         tqdm.write(f"Step {agent._step}/{config.steps} | Saved checkpoint.")
 
     pbar.close()

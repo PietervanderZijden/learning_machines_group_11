@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
-from learning_machines.reference_checkpoint import collect_optimizer_state_dicts
+from learning_machines.reference_checkpoint import (
+    REFERENCE_CHECKPOINT_VERSION,
+    collect_optimizer_state_dicts,
+    load_optimizer_state_dicts,
+    save_checkpoint_atomic,
+    validate_checkpoint,
+)
 
 
 class _ExplodingDescriptor:
@@ -50,3 +57,79 @@ def test_reference_checkpoint_handles_torch_compiled_modules():
 
     assert len(states) == 1
     assert next(iter(states)).endswith("._model_opt._opt")
+
+
+def test_reference_checkpoint_restores_optimizer_state():
+    source = _Agent()
+    source._model_opt._opt.param_groups[0]["lr"] = 4e-5
+    states = collect_optimizer_state_dicts(source)
+    target = _Agent()
+
+    load_optimizer_state_dicts(target, states)
+
+    assert target._model_opt._opt.param_groups[0]["lr"] == 4e-5
+
+
+def test_reference_checkpoint_is_atomic_and_validated(tmp_path):
+    contract = {"reward_contract": "robobo-push-dense-v3"}
+    path = tmp_path / "latest.pt"
+    checkpoint = {
+        "checkpoint_version": REFERENCE_CHECKPOINT_VERSION,
+        "agent_state_dict": {"weight": torch.ones(())},
+        "optims_state_dict": {},
+        "training_step": 4000,
+        "reward_contract": contract,
+        "wandb_run_id": "run-id",
+    }
+
+    save_checkpoint_atomic(checkpoint, path)
+    loaded = torch.load(path, weights_only=False)
+    validate_checkpoint(
+        loaded,
+        reward_contract=contract,
+        replay_step=4000,
+    )
+
+    assert path.exists()
+    assert not (tmp_path / ".latest.pt.tmp").exists()
+
+
+def test_reference_checkpoint_rejects_replay_step_mismatch():
+    checkpoint = {
+        "checkpoint_version": REFERENCE_CHECKPOINT_VERSION,
+        "agent_state_dict": {},
+        "optims_state_dict": {},
+        "training_step": 4000,
+        "reward_contract": {"reward_contract": "robobo-push-dense-v3"},
+    }
+
+    with pytest.raises(ValueError, match="checkpoint/replay step mismatch"):
+        validate_checkpoint(
+            checkpoint,
+            reward_contract=checkpoint["reward_contract"],
+            replay_step=3999,
+        )
+
+
+def test_reference_checkpoint_allows_one_partial_episode_of_replay_lag():
+    checkpoint = {
+        "checkpoint_version": REFERENCE_CHECKPOINT_VERSION,
+        "agent_state_dict": {},
+        "optims_state_dict": {},
+        "training_step": 4000,
+        "reward_contract": {"reward_contract": "robobo-push-dense-v3"},
+    }
+
+    validate_checkpoint(
+        checkpoint,
+        reward_contract=checkpoint["reward_contract"],
+        replay_step=3801,
+        max_replay_lag=199,
+    )
+    with pytest.raises(ValueError, match="checkpoint/replay step mismatch"):
+        validate_checkpoint(
+            checkpoint,
+            reward_contract=checkpoint["reward_contract"],
+            replay_step=3800,
+            max_replay_lag=199,
+        )

@@ -255,9 +255,11 @@ class ActionExecutor:
         self,
         smoothing: SmoothingConfig | None = None,
         safety: PreActionSafetyFilter | None = None,
+        safety_enabled: bool = True,
     ):
         self.smoothing = smoothing or SmoothingConfig()
         self.safety = safety or PreActionSafetyFilter()
+        self.safety_enabled = safety_enabled
         self.previous = np.zeros(2, dtype=np.float32)
 
     def reset(self) -> None:
@@ -271,9 +273,12 @@ class ActionExecutor:
         emergency: bool = False,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         requested = np.clip(np.asarray(requested, dtype=np.float32), -1.0, 1.0)
-        safe, safety_event = self.safety.filter(
-            requested, normalized_ir, blob=blob
-        )
+        if self.safety_enabled:
+            safe, safety_event = self.safety.filter(
+                requested, normalized_ir, blob=blob
+            )
+        else:
+            safe, safety_event = requested, None
         if emergency or safety_event == "emergency_reverse_turn":
             executed = safe
         else:

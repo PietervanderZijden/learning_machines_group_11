@@ -30,6 +30,7 @@ class RoboboNM512Wrapper(gym.Env):
         self._include_ir = include_ir
         self._is_first = True
         self._episode_step = 0
+        self._spin_streak = 0
 
         obs_spaces = {"image": gym.spaces.Box(
             low=0, high=255,
@@ -72,6 +73,7 @@ class RoboboNM512Wrapper(gym.Env):
         obs, info = self._env.reset(seed=seed, options=options)
         self._is_first = True
         self._episode_step = 0
+        self._spin_streak = 0
         return self._convert_obs(obs)
 
     def step(self, action):
@@ -87,6 +89,34 @@ class RoboboNM512Wrapper(gym.Env):
         self._episode_step += 1
         converted = self._convert_obs(obs)
         converted["is_terminal"] = terminated
+        requested = np.asarray(
+            info.get("requested_action", action), dtype=np.float32
+        )
+        executed = np.asarray(
+            info.get("executed_action", action), dtype=np.float32
+        )
+        opposite = bool(
+            executed.shape == (2,)
+            and executed[0] * executed[1] < 0.0
+        )
+        self._spin_streak = self._spin_streak + 1 if opposite else 0
+        converted.update({
+            "log_avg_opposite_wheels": np.float32(opposite),
+            "log_max_spin_sequence": np.float32(self._spin_streak),
+            "log_avg_wheel_saturation": np.float32(
+                np.mean(np.abs(executed) >= 0.999)
+            ),
+            "log_avg_action_execution_error": np.float32(
+                np.max(np.abs(requested - executed))
+            ),
+            "log_avg_block_goal_distance": np.float32(
+                info.get("block_goal_distance", 0.0)
+            ),
+            "log_sum_potential_shaping": np.float32(
+                info.get("potential_shaping", 0.0)
+            ),
+            "log_sum_time_cost": np.float32(info.get("time_cost", 0.0)),
+        })
         return converted, reward, done, info
 
     def render(self, *args, **kwargs):
