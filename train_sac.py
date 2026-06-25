@@ -48,6 +48,90 @@ def _checkpoint_timesteps(path: Path) -> int:
         return -1
 
 
+def _sac_checkpoint_data(path: Path) -> dict:
+    """Read SB3 metadata used to validate manifest recovery."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return json.loads(archive.read("data"))
+    except (
+        OSError,
+        KeyError,
+        ValueError,
+        zipfile.BadZipFile,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError(f"cannot inspect SAC checkpoint {path}: {exc}") from exc
+
+
+def validate_sac_manifest_recovery(
+    checkpoint: Path,
+    curriculum_state_path: Path,
+    args,
+) -> dict:
+    """Validate a sparse SAC run before reconstructing a missing manifest."""
+    if not curriculum_state_path.exists():
+        raise ValueError(
+            "refusing to recover a SAC manifest without curriculum_state.json; "
+            "the sparse reward contract cannot be established safely"
+        )
+    curriculum_state = json.loads(curriculum_state_path.read_text())
+    curriculum_config = curriculum_state.get("config", {})
+    expected_curriculum = {
+        "enabled": args.curriculum,
+        "success_threshold": args.curriculum_success_threshold,
+        "window": args.curriculum_window,
+        "min_stage_steps": args.curriculum_min_stage_steps,
+        "goal_jitter_radius": args.curriculum_goal_jitter_radius,
+    }
+    curriculum_mismatches = {
+        key: (curriculum_config.get(key), expected)
+        for key, expected in expected_curriculum.items()
+        if curriculum_config.get(key) != expected
+    }
+    if curriculum_mismatches:
+        raise ValueError(
+            "cannot recover SAC manifest because curriculum options differ "
+            f"from persisted state: {curriculum_mismatches}"
+        )
+
+    data = _sac_checkpoint_data(checkpoint)
+    observation_shape = tuple(data.get("observation_space", {}).get("_shape", ()))
+    action_shape = tuple(data.get("action_space", {}).get("_shape", ()))
+    expected = {
+        "observation_shape": (18,),
+        "action_shape": (2,),
+        "gamma": SAC_GAMMA,
+        "learning_rate": args.learning_rate,
+        "batch_size": args.batch_size,
+        "buffer_size": args.buffer_size,
+        "learning_starts": args.learning_starts,
+        "ent_coef": args.entropy_coefficient,
+        "max_grad_norm": args.max_grad_norm,
+    }
+    actual = {
+        "observation_shape": observation_shape,
+        "action_shape": action_shape,
+        "gamma": data.get("gamma"),
+        "learning_rate": data.get("learning_rate"),
+        "batch_size": data.get("batch_size"),
+        "buffer_size": data.get("buffer_size"),
+        "learning_starts": data.get("learning_starts"),
+        "ent_coef": data.get("ent_coef"),
+        "max_grad_norm": data.get("max_grad_norm"),
+    }
+    mismatches = {
+        key: (actual[key], expected_value)
+        for key, expected_value in expected.items()
+        if actual[key] != expected_value
+    }
+    if mismatches:
+        raise ValueError(
+            "cannot recover SAC manifest because checkpoint configuration is "
+            f"incompatible: {mismatches}"
+        )
+    return curriculum_state
+
+
 def find_sac_resume_checkpoint(checkpoint_dir: Path) -> tuple[Path | None, int]:
     """Return the valid SAC checkpoint with the greatest saved timestep."""
     candidates = list(checkpoint_dir.glob("sac_*_steps*.zip"))
@@ -94,6 +178,43 @@ def promote_sac_checkpoint(
         latest_buffer = checkpoint_dir / "replay_buffer.pkl"
         if replay_buffer.resolve() != latest_buffer.resolve():
             shutil.copy2(replay_buffer, latest_buffer)
+
+
+def build_sac_manifest(
+    manifest_class,
+    calibration_name: str,
+    args,
+    curriculum_stage: int,
+    curriculum_stage_name: str,
+):
+    """Create the canonical manifest for fresh, resumed, and recovered runs."""
+    return manifest_class(
+        algorithm="sac",
+        calibration_profile=calibration_name,
+        image_size=64,
+        observation_contract="robobo-push-obs-v1",
+        reward_contract=PUSH_REWARD_CONTRACT,
+        algorithm_config={
+            "learning_rate": args.learning_rate,
+            "batch_size": args.batch_size,
+            "buffer_size": args.buffer_size,
+            "observation_dim": 18,
+            "task": "push",
+            "domain_randomization": args.domain_randomization,
+            "hardware_calibration": args.hardware_calibration,
+            "entropy_coefficient": args.entropy_coefficient,
+            "max_grad_norm": args.max_grad_norm,
+            "gamma": SAC_GAMMA,
+            "max_episode_steps": args.max_episode_steps,
+            "curriculum": args.curriculum,
+            "curriculum_stage": curriculum_stage,
+            "curriculum_stage_name": curriculum_stage_name,
+            "curriculum_success_threshold": args.curriculum_success_threshold,
+            "curriculum_window": args.curriculum_window,
+            "curriculum_min_stage_steps": args.curriculum_min_stage_steps,
+            "curriculum_goal_jitter_radius": args.curriculum_goal_jitter_radius,
+        },
+    )
 
 
 class RoboboSACEnv(gym.Env):
@@ -494,6 +615,17 @@ def main():
     from learning_machines.domain_randomization import RandomizationRanges
     from learning_machines.transfer import CalibrationProfile, CheckpointManifest
 
+    calibration_name = CalibrationProfile.load(args.calibration).name
+
+    def save_manifest(stage: int, stage_name: str) -> None:
+        build_sac_manifest(
+            CheckpointManifest,
+            calibration_name,
+            args,
+            stage,
+            stage_name,
+        ).save(checkpoint_dir / "manifest.json")
+
     randomization_ranges = None
     if args.hardware_calibration:
         randomization_ranges = RandomizationRanges.from_calibration_profiles(
@@ -573,6 +705,10 @@ def main():
                     )
                 if info.get("curriculum_promoted"):
                     promoted_stage = int(info["curriculum_stage"])
+                    save_manifest(
+                        promoted_stage,
+                        str(info.get("curriculum_stage_name", "unknown")),
+                    )
                     self.model.save(
                         str(checkpoint_dir / f"sac_promotion_stage_{promoted_stage}")
                     )
@@ -715,6 +851,11 @@ def main():
             "safety_with_visible_block",
         ),
     )
+    if not args.resume or existing_manifest_path.exists():
+        save_manifest(
+            env.unwrapped.curriculum_controller.stage,
+            env.unwrapped.curriculum_controller.stage_name,
+        )
 
     callbacks = []
     callbacks.append(TransferMetricsCallback())
@@ -730,11 +871,20 @@ def main():
     if resume_path is not None:
         manifest_path = checkpoint_dir / "manifest.json"
         if not manifest_path.exists():
-            raise ValueError(
-                "refusing to resume a SAC checkpoint without a versioned manifest"
+            recovered_state = validate_sac_manifest_recovery(
+                resume_path,
+                curriculum_state_path,
+                args,
+            )
+            recovered_stage = int(recovered_state["stage"])
+            recovered_stage_name = str(recovered_state["stage_name"])
+            save_manifest(recovered_stage, recovered_stage_name)
+            print(
+                "Recovered missing manifest.json from verified SB3 checkpoint "
+                f"metadata and curriculum state (stage {recovered_stage}: "
+                f"{recovered_stage_name})."
             )
         manifest = CheckpointManifest.load(manifest_path)
-        calibration_name = CalibrationProfile.load(args.calibration).name
         manifest_mismatches = {
             "algorithm": (manifest.algorithm, "sac"),
             "calibration_profile": (manifest.calibration_profile, calibration_name),
@@ -869,34 +1019,10 @@ def main():
                 f"Preserved newer {existing_steps:,}-step checkpoint; "
                 f"saved this run to {recovery_path}"
             )
-        calibration_name = CalibrationProfile.load(args.calibration).name
-        CheckpointManifest(
-            algorithm="sac",
-            calibration_profile=calibration_name,
-            image_size=64,
-            observation_contract="robobo-push-obs-v1",
-            reward_contract=PUSH_REWARD_CONTRACT,
-            algorithm_config={
-                "learning_rate": args.learning_rate,
-                "batch_size": args.batch_size,
-                "buffer_size": args.buffer_size,
-                "observation_dim": 18,
-                "task": "push",
-                "domain_randomization": args.domain_randomization,
-                "hardware_calibration": args.hardware_calibration,
-                "entropy_coefficient": args.entropy_coefficient,
-                "max_grad_norm": args.max_grad_norm,
-                "gamma": SAC_GAMMA,
-                "max_episode_steps": args.max_episode_steps,
-                "curriculum": args.curriculum,
-                "curriculum_stage": env.unwrapped.curriculum_controller.stage,
-                "curriculum_stage_name": env.unwrapped.curriculum_controller.stage_name,
-                "curriculum_success_threshold": args.curriculum_success_threshold,
-                "curriculum_window": args.curriculum_window,
-                "curriculum_min_stage_steps": args.curriculum_min_stage_steps,
-                "curriculum_goal_jitter_radius": args.curriculum_goal_jitter_radius,
-            },
-        ).save(checkpoint_dir / "manifest.json")
+        save_manifest(
+            env.unwrapped.curriculum_controller.stage,
+            env.unwrapped.curriculum_controller.stage_name,
+        )
         if wandb_run is not None:
             wandb_run.finish()
         env.close()

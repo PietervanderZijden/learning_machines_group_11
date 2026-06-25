@@ -1,6 +1,7 @@
 import json
 import time
 import zipfile
+from types import SimpleNamespace
 
 import gymnasium as gym
 import cv2
@@ -34,6 +35,7 @@ from train_sac import (
     find_sac_resume_checkpoint,
     matching_sac_replay_buffer,
     promote_sac_checkpoint,
+    validate_sac_manifest_recovery,
 )
 
 
@@ -771,6 +773,86 @@ def test_sac_resume_selects_highest_embedded_timestep(tmp_path):
     promote_sac_checkpoint(tmp_path, selected, replay)
     assert find_sac_resume_checkpoint(tmp_path)[1] == 420000
     assert (tmp_path / "replay_buffer.pkl").read_bytes() == b"buffer"
+
+
+def _sac_recovery_args(**overrides):
+    values = {
+        "curriculum": False,
+        "curriculum_success_threshold": 0.8,
+        "curriculum_window": 100,
+        "curriculum_min_stage_steps": 20_000,
+        "curriculum_goal_jitter_radius": 0.2,
+        "learning_rate": 3e-4,
+        "batch_size": 256,
+        "buffer_size": 1_000_000,
+        "learning_starts": 2_000,
+        "entropy_coefficient": 0.01,
+        "max_grad_norm": 10.0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_sac_missing_manifest_can_be_recovered_from_checkpoint_and_curriculum(tmp_path):
+    checkpoint = tmp_path / "sac_220000_steps.zip"
+    with zipfile.ZipFile(checkpoint, "w") as archive:
+        archive.writestr("data", json.dumps({
+            "num_timesteps": 220_000,
+            "observation_space": {"_shape": [18]},
+            "action_space": {"_shape": [2]},
+            "gamma": 0.9801,
+            "learning_rate": 3e-4,
+            "batch_size": 256,
+            "buffer_size": 1_000_000,
+            "learning_starts": 2_000,
+            "ent_coef": 0.01,
+            "max_grad_norm": 10.0,
+        }))
+    state_path = tmp_path / "curriculum_state.json"
+    state_path.write_text(json.dumps({
+        "version": 1,
+        "stage": 2,
+        "stage_name": "full",
+        "config": {
+            "enabled": False,
+            "start_stage": 0,
+            "success_threshold": 0.8,
+            "window": 100,
+            "min_stage_steps": 20_000,
+            "goal_jitter_radius": 0.2,
+        },
+    }))
+
+    state = validate_sac_manifest_recovery(
+        checkpoint, state_path, _sac_recovery_args()
+    )
+
+    assert state["stage"] == 2
+
+
+def test_sac_manifest_recovery_rejects_different_curriculum_options(tmp_path):
+    checkpoint = tmp_path / "sac_1_steps.zip"
+    with zipfile.ZipFile(checkpoint, "w") as archive:
+        archive.writestr("data", json.dumps({}))
+    state_path = tmp_path / "curriculum_state.json"
+    state_path.write_text(json.dumps({
+        "config": {
+            "enabled": False,
+            "success_threshold": 0.8,
+            "window": 100,
+            "min_stage_steps": 20_000,
+            "goal_jitter_radius": 0.2,
+        },
+    }))
+
+    with np.testing.assert_raises_regex(
+        ValueError, "curriculum options differ"
+    ):
+        validate_sac_manifest_recovery(
+            checkpoint,
+            state_path,
+            _sac_recovery_args(curriculum=True),
+        )
 
 
 def test_hardware_wall_clock_delay_is_penalized():
