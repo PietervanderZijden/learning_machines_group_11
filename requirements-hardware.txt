@@ -1,0 +1,4 @@
+gym==0.22.0
+gymnasium==1.0.0
+ruamel.yaml==0.17.40
+tensorboard==2.14.0

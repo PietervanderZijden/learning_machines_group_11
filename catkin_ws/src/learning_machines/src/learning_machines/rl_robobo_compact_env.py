@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import cv2
@@ -82,6 +83,8 @@ class RoboboCompactEnvConfig:
     push_red_hsv_high_2: tuple[int, int, int] = (180, 255, 255)
     push_green_hsv_low: tuple[int, int, int] = (35, 70, 60)
     push_green_hsv_high: tuple[int, int, int] = (90, 255, 255)
+    hardware_inference_only: bool = False
+    hardware_wheel_command: Callable[[int, int, int], None] | None = None
 
 
 @dataclass
@@ -121,6 +124,8 @@ class RoboboCompactEnv(gym.Env):
 
         if self.config.task not in {"food_collection", "push"}:
             raise ValueError("task must be 'food_collection' or 'push'")
+        if self.config.hardware_inference_only and self._is_simulation:
+            raise ValueError("hardware_inference_only requires physical hardware")
 
         obs_spaces = {
             "ir": spaces.Box(low=0.0, high=1.0, shape=(8,), dtype=np.float32),
@@ -244,15 +249,16 @@ class RoboboCompactEnv(gym.Env):
             )
         if self.config.task == "push":
             geometry = self._push_geometry()
-            if geometry is None:
+            if geometry is None and not self.config.hardware_inference_only:
                 raise RuntimeError(
                     "push reward requires CoppeliaSim world positions for the "
                     "robot, red block, and green goal"
                 )
-            self._previous_block_goal_distance = self._geometry_block_goal_distance(
-                geometry
-            )
-            self._previous_push_potential = self._push_potential(geometry)
+            if geometry is not None:
+                self._previous_block_goal_distance = self._geometry_block_goal_distance(
+                    geometry
+                )
+                self._previous_push_potential = self._push_potential(geometry)
         self._last_observation_wall_time = time.monotonic()
         info = self._get_info(obs_context)
         if self.config.task == "push":
@@ -275,7 +281,17 @@ class RoboboCompactEnv(gym.Env):
 
         try:
             wheel_start = time.perf_counter()
-            if not self._is_simulation and hasattr(self.rob, "move_blocking"):
+            if (
+                not self._is_simulation
+                and self.config.hardware_wheel_command is not None
+            ):
+                self.config.hardware_wheel_command(
+                    int(np.clip(round(left_speed), -100, 100)),
+                    int(np.clip(round(right_speed), -100, 100)),
+                    int(round(duration_s * 1000.0)),
+                )
+                explicit_step_seconds = 0.0
+            elif not self._is_simulation and hasattr(self.rob, "move_blocking"):
                 self.rob.move_blocking(
                     int(np.clip(round(left_speed), -100, 100)),
                     int(np.clip(round(right_speed), -100, 100)),
@@ -330,6 +346,28 @@ class RoboboCompactEnv(gym.Env):
         self._elapsed_seconds += elapsed_delta_seconds
         truncated = self._elapsed_seconds >= self.max_episode_seconds - 1e-9
         if self.config.task == "push":
+            if self.config.hardware_inference_only:
+                self._collision_count += int(bool(info["collision"]))
+                self._safety_override_count += int(
+                    action_info["safety_override"] is not None
+                )
+                self._action_change_total += action_info["action_change"]
+                self._saturation_total += action_info["action_saturation"]
+                info["left_speed"] = left_speed
+                info["right_speed"] = right_speed
+                info.update(action_info)
+                info.update(self._push_observation_info(obs, progress=0.0))
+                info["elapsed_seconds"] = self._elapsed_seconds
+                info["transition_seconds"] = elapsed_delta_seconds
+                info["collisions"] = self._collision_count
+                info["safety_overrides"] = self._safety_override_count
+                info["mean_action_change"] = (
+                    self._action_change_total / self._step_count
+                )
+                info["action_saturation_rate"] = (
+                    self._saturation_total / self._step_count
+                )
+                return obs, 0.0, False, truncated, info
             reward, terminated, reward_info = self._push_reward(
                 obs=obs,
                 elapsed_delta_seconds=elapsed_delta_seconds,
@@ -402,7 +440,8 @@ class RoboboCompactEnv(gym.Env):
 
     def close(self) -> None:
         try:
-            self.rob.set_wheel_speeds(0, 0)
+            if not self.config.hardware_inference_only:
+                self.rob.set_wheel_speeds(0, 0)
             if self._is_simulation and not self.rob.is_stopped():
                 self.rob.stop_simulation()
         except Exception:

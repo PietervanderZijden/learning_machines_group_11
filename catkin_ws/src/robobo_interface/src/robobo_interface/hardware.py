@@ -208,6 +208,20 @@ class HardwareRobobo(IRobobo):
 
         self._logger("Succesfully initialised Learning Machines robobo controller node")
 
+    def refresh_move_service(self) -> None:
+        """Replace a possibly wedged wheel service connection.
+
+        Hardware deployment calls this after a timed-out service request.  The
+        old proxy is closed best-effort so the next retry establishes a fresh
+        ROS connection instead of reusing a broken TCPROS socket.
+        """
+        old_proxy = self._move_srv
+        try:
+            old_proxy.close()
+        except Exception:
+            pass
+        self._move_srv = rospy.ServiceProxy(MOVE_WHEELS_SERVICE, MoveWheels)
+
     def set_emotion(self, emotion: Emotion) -> None:
         """Show the emotion of the robot.
         For the hardware, this means showing on the phone screen.
