@@ -70,10 +70,14 @@ class RoboboCompactEnvConfig:
     push_max_block_goal_distance: float = 1.20
     push_success_distance: float = 0.18
     push_discount: float = 0.997
-    push_block_goal_weight: float = 2.0
-    push_robot_pose_weight: float = 1.0
+    push_approach_potential_scale: float = 2.0
+    push_goal_potential_offset: float = 2.0
+    push_goal_potential_scale: float = 4.0
+    push_contact_bonus: float = 1.0
+    push_approach_completion_bonus: float = 5.0
+    push_goal_completion_bonus: float = 15.0
     push_standoff_distance: float = 0.22
-    push_time_penalty_per_second: float = 2.5
+    push_time_penalty_per_second: float = 0.05
     push_action_change_penalty: float = 0.0
     push_red_hsv_low_1: tuple[int, int, int] = (0, 80, 60)
     push_red_hsv_high_1: tuple[int, int, int] = (12, 255, 255)
@@ -185,8 +189,12 @@ class RoboboCompactEnv(gym.Env):
         self._push_layout_mode = "full"
         self._authored_red_block_pose: tuple[float, float, float] | None = None
         self._authored_green_goal_pose: tuple[float, float, float] | None = None
+        self._authored_robot_pose: tuple[float, float, float] | None = None
+        self._authored_robot_orientation: tuple[float, float, float] | None = None
+        self._robot_respondable_handles: tuple[int, ...] = ()
         self._previous_block_goal_distance: float | None = None
         self._previous_push_potential: float | None = None
+        self._contact_acquired = False
         self._blob_track_missed = 0
         self._blob_target_switches = 0
         self._blob_target_confidence = 0.0
@@ -248,7 +256,10 @@ class RoboboCompactEnv(gym.Env):
             self._previous_block_goal_distance = self._geometry_block_goal_distance(
                 geometry
             )
-            self._previous_push_potential = self._push_potential(geometry)
+            self._contact_acquired = self.config.push_curriculum_stage == 1
+            self._previous_push_potential = self._push_potential(
+                geometry, contact_acquired=self._contact_acquired
+            )
         self._last_observation_wall_time = time.monotonic()
         info = self._get_info(obs_context)
         if self.config.task == "push":
@@ -554,12 +565,25 @@ class RoboboCompactEnv(gym.Env):
         self._blob_target_switches = 0
         self._blob_target_confidence = 0.0
         self._previous_block_goal_distance = None
+        self._previous_push_potential = None
+        self._contact_acquired = False
 
     def _cache_initial_position(self) -> None:
         try:
             pos = self.rob.get_position()
             self._initial_pos_x = pos.x
             self._initial_pos_y = pos.y
+            if self._authored_robot_pose is None:
+                self._authored_robot_pose = (float(pos.x), float(pos.y), float(pos.z))
+                try:
+                    orientation = self.rob.get_orientation()
+                    self._authored_robot_orientation = (
+                        float(orientation.yaw),
+                        float(orientation.pitch),
+                        float(orientation.roll),
+                    )
+                except Exception:
+                    self._authored_robot_orientation = (0.0, 0.0, 0.0)
         except Exception:
             self._initial_pos_x = self._arena_cx
             self._initial_pos_y = self._arena_cy
@@ -592,6 +616,7 @@ class RoboboCompactEnv(gym.Env):
 
     def _ensure_push_handles(self) -> None:
         if self._push_handles_are_valid():
+            self._cache_robot_respondable_handles()
             return
         self._red_block_handle = self._find_sim_object((
             "/red_block",
@@ -619,6 +644,34 @@ class RoboboCompactEnv(gym.Env):
             "Base",
         ))
         self._cache_push_object_heights()
+        self._cache_robot_respondable_handles()
+
+    def _cache_robot_respondable_handles(self) -> None:
+        if not self._is_simulation or getattr(
+            self, "_robot_respondable_handles", ()
+        ):
+            return
+        sim = self.rob._sim
+        robot_root = getattr(self.rob, "_robobo", None)
+        if robot_root is None:
+            return
+        handles: list[int] = []
+        try:
+            candidates = sim.getObjectsInTree(
+                robot_root, sim.object_shape_type, 0
+            )
+        except Exception:
+            candidates = ()
+        for handle in candidates:
+            try:
+                respondable = sim.getObjectInt32Param(
+                    handle, sim.shapeintparam_respondable
+                )
+            except Exception:
+                continue
+            if respondable:
+                handles.append(int(handle))
+        self._robot_respondable_handles = tuple(handles)
 
     def _find_sim_object(self, names: tuple[str, ...]) -> int | None:
         if not self._is_simulation:
@@ -713,6 +766,42 @@ class RoboboCompactEnv(gym.Env):
         except Exception:
             pass
 
+    def _set_robot_push_pose(
+        self,
+        block_xy: tuple[float, float],
+        goal_xy: tuple[float, float],
+    ) -> None:
+        if self._authored_robot_pose is None:
+            return
+        distance = self._xy_distance(block_xy, goal_xy)
+        if distance <= 1e-9:
+            return
+        direction = (
+            (goal_xy[0] - block_xy[0]) / distance,
+            (goal_xy[1] - block_xy[1]) / distance,
+        )
+        robot_xy = (
+            block_xy[0] - self.config.push_standoff_distance * direction[0],
+            block_xy[1] - self.config.push_standoff_distance * direction[1],
+        )
+        sim = self.rob._sim
+        robot_handle = getattr(self.rob, "_robobo", None)
+        if robot_handle is None:
+            return
+        sim.setObjectPosition(
+            robot_handle,
+            [robot_xy[0], robot_xy[1], self._authored_robot_pose[2]],
+        )
+        orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
+        sim.setObjectOrientation(
+            robot_handle,
+            [math.atan2(direction[1], direction[0]), orientation[1], orientation[2]],
+        )
+        try:
+            sim.resetDynamicObject(robot_handle)
+        except Exception:
+            pass
+
     def _randomize_push_layout(self) -> None:
         self._push_layout_randomized = False
         if not self._push_handles_are_valid():
@@ -735,13 +824,13 @@ class RoboboCompactEnv(gym.Env):
         goal_xy = (authored_goal[0], authored_goal[1])
 
         if stage == 0:
-            self._push_layout_mode = "fixed"
+            self._push_layout_mode = "approach"
             self._set_push_object_pose(self._red_block_handle, block_xy, authored_block[2])
             self._set_push_object_pose(self._green_goal_handle, goal_xy, authored_goal[2])
             return
 
         if stage == 1:
-            self._push_layout_mode = "goal_jitter"
+            self._push_layout_mode = "push"
             for _ in range(100):
                 angle = random.uniform(0.0, 2.0 * math.pi)
                 radius = self.config.push_goal_jitter_radius * math.sqrt(random.random())
@@ -754,6 +843,7 @@ class RoboboCompactEnv(gym.Env):
                     break
             self._set_push_object_pose(self._red_block_handle, block_xy, authored_block[2])
             self._set_push_object_pose(self._green_goal_handle, goal_xy, authored_goal[2])
+            self._set_robot_push_pose(block_xy, goal_xy)
             self._push_layout_randomized = True
             return
 
@@ -1085,6 +1175,17 @@ class RoboboCompactEnv(gym.Env):
         _robot, block, goal = geometry
         return math.hypot(block[0] - goal[0], block[1] - goal[1])
 
+    @staticmethod
+    def _geometry_robot_block_distance(
+        geometry: tuple[
+            tuple[float, float],
+            tuple[float, float],
+            tuple[float, float],
+        ],
+    ) -> float:
+        robot, block, _goal = geometry
+        return math.hypot(robot[0] - block[0], robot[1] - block[1])
+
     def _push_potential(
         self,
         geometry: tuple[
@@ -1092,35 +1193,48 @@ class RoboboCompactEnv(gym.Env):
             tuple[float, float],
             tuple[float, float],
         ],
+        contact_acquired: bool | None = None,
     ) -> float:
-        robot, block, goal = geometry
-        block_goal_distance = self._geometry_block_goal_distance(geometry)
-        if block_goal_distance > 1e-9:
-            goal_direction = (
-                (goal[0] - block[0]) / block_goal_distance,
-                (goal[1] - block[1]) / block_goal_distance,
+        if contact_acquired is None:
+            contact_acquired = self._contact_acquired
+        if not contact_acquired:
+            robot_block_distance = self._geometry_robot_block_distance(geometry)
+            normalized = min(
+                1.0,
+                robot_block_distance / (2.0 * self.config.push_arena_radius),
             )
-        else:
-            goal_direction = (0.0, 0.0)
-        ideal_push_pose = (
-            block[0] - self.config.push_standoff_distance * goal_direction[0],
-            block[1] - self.config.push_standoff_distance * goal_direction[1],
+            return self.config.push_approach_potential_scale * (1.0 - normalized)
+
+        block_goal_distance = self._geometry_block_goal_distance(geometry)
+        distance_range = max(
+            1e-9,
+            self.config.push_max_block_goal_distance
+            - self.config.push_success_distance,
         )
-        robot_pose_distance = math.hypot(
-            robot[0] - ideal_push_pose[0],
-            robot[1] - ideal_push_pose[1],
+        normalized = min(
+            1.0,
+            max(0.0, block_goal_distance - self.config.push_success_distance)
+            / distance_range,
         )
-        block_term = (
-            self.config.push_block_goal_weight
-            * block_goal_distance
-            / self.config.push_max_block_goal_distance
+        return (
+            self.config.push_goal_potential_offset
+            + self.config.push_goal_potential_scale * (1.0 - normalized)
         )
-        robot_term = (
-            self.config.push_robot_pose_weight
-            * robot_pose_distance
-            / (2.0 * self.config.push_arena_radius)
-        )
-        return -(block_term + robot_term)
+
+    def _robot_block_contact(self) -> bool:
+        if not self._push_handles_are_valid():
+            return False
+        self._cache_robot_respondable_handles()
+        sim = self.rob._sim
+        for handle in self._robot_respondable_handles:
+            try:
+                result = sim.checkCollision(handle, self._red_block_handle)
+                value = result[0] if isinstance(result, (tuple, list)) else result
+                if int(value) > 0:
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _camera_block_goal_distance(self, obs: dict) -> float | None:
         red = np.asarray(obs.get("red_block", np.zeros(4)), dtype=np.float32)
@@ -1160,6 +1274,7 @@ class RoboboCompactEnv(gym.Env):
             "push_layout_randomized": float(self._push_layout_randomized),
             "push_layout_mode": getattr(self, "_push_layout_mode", "full"),
             "curriculum_stage": float(self.config.push_curriculum_stage),
+            "push_phase": float(self._contact_acquired),
         }
 
     def _push_reward(
@@ -1176,48 +1291,76 @@ class RoboboCompactEnv(gym.Env):
                 "red block, or green goal"
             )
         distance = self._geometry_block_goal_distance(geometry)
+        robot_block_distance = self._geometry_robot_block_distance(geometry)
         progress = 0.0
-        if distance is not None and self._previous_block_goal_distance is not None:
+        if self._previous_block_goal_distance is not None:
             progress = self._previous_block_goal_distance - distance
         self._previous_block_goal_distance = distance
-        success = self._push_success(obs, distance)
-        potential = self._push_potential(geometry)
+        goal_success = self._push_success(obs, distance)
+        contact_now = self._robot_block_contact()
+        contact_just_acquired = contact_now and not self._contact_acquired
+        if contact_now:
+            self._contact_acquired = True
+        stage = int(self.config.push_curriculum_stage)
+        curriculum_success = self._contact_acquired if stage == 0 else goal_success
+        terminated = bool(
+            (stage == 0 and contact_just_acquired)
+            or (stage != 0 and goal_success)
+        )
+        potential = self._push_potential(
+            geometry, contact_acquired=self._contact_acquired
+        )
         previous_potential = self._previous_push_potential
         if previous_potential is None:
             previous_potential = potential
-        potential_shaping = 0.0
-        self._previous_push_potential = potential
-        time_cost = 0.0
-        collision_cost = 0.0
-        action_change_cost = 0.0
-        reward = float(success)
-        robot, block, goal = geometry
-        block_goal_distance = self._geometry_block_goal_distance(geometry)
-        if block_goal_distance > 1e-9:
-            goal_direction = (
-                (goal[0] - block[0]) / block_goal_distance,
-                (goal[1] - block[1]) / block_goal_distance,
-            )
-        else:
-            goal_direction = (0.0, 0.0)
-        ideal_push_pose = (
-            block[0] - self.config.push_standoff_distance * goal_direction[0],
-            block[1] - self.config.push_standoff_distance * goal_direction[1],
+        next_potential = 0.0 if terminated else potential
+        potential_shaping = (
+            self.config.push_discount * next_potential - previous_potential
         )
-        robot_pose_distance = math.hypot(
-            robot[0] - ideal_push_pose[0],
-            robot[1] - ideal_push_pose[1],
+        self._previous_push_potential = potential
+        time_cost = (
+            max(0.0, elapsed_delta_seconds)
+            * self.config.push_time_penalty_per_second
+        )
+        contact_bonus = (
+            self.config.push_contact_bonus
+            if contact_just_acquired and stage == 2
+            else 0.0
+        )
+        approach_completion_bonus = (
+            self.config.push_approach_completion_bonus
+            if contact_just_acquired and stage == 0
+            else 0.0
+        )
+        goal_completion_bonus = (
+            self.config.push_goal_completion_bonus
+            if goal_success and stage != 0
+            else 0.0
+        )
+        reward = (
+            potential_shaping
+            + contact_bonus
+            + approach_completion_bonus
+            + goal_completion_bonus
+            - time_cost
         )
         info = self._push_observation_info(obs, progress=progress)
         info.update({
             "push_potential": float(potential),
             "potential_shaping": float(potential_shaping),
-            "robot_push_pose_distance": float(robot_pose_distance),
+            "robot_block_distance": float(robot_block_distance),
+            "robot_block_contact": float(contact_now),
+            "contact_acquired": float(self._contact_acquired),
+            "contact_bonus": float(contact_bonus),
+            "approach_completion_bonus": float(approach_completion_bonus),
+            "goal_completion_bonus": float(goal_completion_bonus),
             "time_cost": float(time_cost),
-            "collision_penalty": float(collision_cost),
-            "action_change_penalty": float(action_change_cost),
+            "collision_penalty": 0.0,
+            "action_change_penalty": 0.0,
+            "push_success": float(goal_success),
+            "curriculum_success": float(curriculum_success),
         })
-        return float(reward), success, info
+        return float(reward), terminated, info
 
     def _get_info(self, obs_context: _ObsContext | None = None) -> dict:
         try:

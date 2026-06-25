@@ -27,7 +27,14 @@ import numpy as np
 from gymnasium import spaces
 
 SAC_GAMMA = 0.9801
-PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
+PUSH_REWARD_CONTRACT = "robobo-push-phased-dense-v1"
+PUSH_TIME_PENALTY_PER_SECOND = 0.05
+PUSH_APPROACH_POTENTIAL_SCALE = 2.0
+PUSH_GOAL_POTENTIAL_OFFSET = 2.0
+PUSH_GOAL_POTENTIAL_SCALE = 4.0
+PUSH_CONTACT_BONUS = 1.0
+PUSH_APPROACH_COMPLETION_BONUS = 5.0
+PUSH_GOAL_COMPLETION_BONUS = 15.0
 
 
 def _save_episode_atomic(path: Path, data: dict[str, np.ndarray]) -> None:
@@ -68,13 +75,18 @@ def validate_sac_manifest_recovery(
     curriculum_state_path: Path,
     args,
 ) -> dict:
-    """Validate a sparse SAC run before reconstructing a missing manifest."""
+    """Validate a phased-dense SAC run before reconstructing a manifest."""
     if not curriculum_state_path.exists():
         raise ValueError(
             "refusing to recover a SAC manifest without curriculum_state.json; "
-            "the sparse reward contract cannot be established safely"
+            "the phased dense reward contract cannot be established safely"
         )
     curriculum_state = json.loads(curriculum_state_path.read_text())
+    if int(curriculum_state.get("version", 1)) != 2:
+        raise ValueError(
+            "cannot recover SAC manifest from an incompatible curriculum "
+            "state; start a fresh run"
+        )
     curriculum_config = curriculum_state.get("config", {})
     expected_curriculum = {
         "enabled": args.curriculum,
@@ -213,6 +225,14 @@ def build_sac_manifest(
             "curriculum_window": args.curriculum_window,
             "curriculum_min_stage_steps": args.curriculum_min_stage_steps,
             "curriculum_goal_jitter_radius": args.curriculum_goal_jitter_radius,
+            "reward_contract": PUSH_REWARD_CONTRACT,
+            "push_time_penalty_per_second": PUSH_TIME_PENALTY_PER_SECOND,
+            "push_approach_potential_scale": PUSH_APPROACH_POTENTIAL_SCALE,
+            "push_goal_potential_offset": PUSH_GOAL_POTENTIAL_OFFSET,
+            "push_goal_potential_scale": PUSH_GOAL_POTENTIAL_SCALE,
+            "push_contact_bonus": PUSH_CONTACT_BONUS,
+            "push_approach_completion_bonus": PUSH_APPROACH_COMPLETION_BONUS,
+            "push_goal_completion_bonus": PUSH_GOAL_COMPLETION_BONUS,
         },
     )
 
@@ -235,7 +255,7 @@ class RoboboSACEnv(gym.Env):
         pose_jitter=0.02,
         wheel_noise_std=0.03,
         wheel_noise_prob=0.3,
-        time_penalty_per_second=2.5,
+        time_penalty_per_second=PUSH_TIME_PENALTY_PER_SECOND,
         collision_penalty=0.0,
         action_change_penalty=0.0,
         emergency_override_penalty=0.0,
@@ -287,6 +307,13 @@ class RoboboSACEnv(gym.Env):
             push_curriculum_stage=self.curriculum_controller.stage,
             push_goal_jitter_radius=curriculum_goal_jitter_radius,
             push_discount=SAC_GAMMA,
+            push_time_penalty_per_second=time_penalty_per_second,
+            push_approach_potential_scale=PUSH_APPROACH_POTENTIAL_SCALE,
+            push_goal_potential_offset=PUSH_GOAL_POTENTIAL_OFFSET,
+            push_goal_potential_scale=PUSH_GOAL_POTENTIAL_SCALE,
+            push_contact_bonus=PUSH_CONTACT_BONUS,
+            push_approach_completion_bonus=PUSH_APPROACH_COMPLETION_BONUS,
+            push_goal_completion_bonus=PUSH_GOAL_COMPLETION_BONUS,
             calibration_path=calibration_path,
             return_image=not no_record,
             image_obs_size=(image_size, image_size),
@@ -346,8 +373,8 @@ class RoboboSACEnv(gym.Env):
         metrics["randomization_enabled"] = float(randomization_enabled)
         return metrics
 
-    def _get_push_success(self, info):
-        return float(info.get("push_success", 0.0))
+    def _get_curriculum_success(self, info):
+        return float(info.get("curriculum_success", 0.0))
 
     def _save_episode(self):
         if not self._record or self._record_dir is None or len(self._episode_images) < 2:
@@ -361,7 +388,7 @@ class RoboboSACEnv(gym.Env):
             "reward_contract": np.array(PUSH_REWARD_CONTRACT),
             "curriculum_stage": np.array(self._episode_curriculum_stage),
             "curriculum_stage_name": np.array(
-                ("fixed", "goal_jitter", "full")[self._episode_curriculum_stage]
+                ("approach", "push", "full")[self._episode_curriculum_stage]
             ),
             "push_layout_mode": np.array(
                 getattr(self._base_env, "_push_layout_mode", "full")
@@ -400,14 +427,14 @@ class RoboboSACEnv(gym.Env):
             info.get("executed_action", action), dtype=np.float32
         ).copy()
         self._previous_executed_action = executed_action
-        push_success = self._get_push_success(info)
+        curriculum_success = self._get_curriculum_success(info)
         obs = self._flatten_obs(obs_dict)
         info = dict(info)
         info["raw_reward"] = float(raw_reward)
-        info["push_success"] = push_success
+        info["curriculum_success"] = curriculum_success
         info.setdefault("push_potential", 0.0)
         info.setdefault("potential_shaping", 0.0)
-        info.setdefault("robot_push_pose_distance", float("nan"))
+        info.setdefault("robot_block_distance", float("nan"))
         info.setdefault(
             "time_cost",
             0.0,
@@ -418,7 +445,9 @@ class RoboboSACEnv(gym.Env):
         promotion = None
         episode_stage = self._episode_curriculum_stage
         if terminated or truncated:
-            promotion = self.curriculum_controller.record_episode(bool(push_success))
+            promotion = self.curriculum_controller.record_episode(
+                bool(curriculum_success)
+            )
             if promotion is not None:
                 stage_steps = float(promotion["stage_steps"])
                 stage_episodes = float(promotion["episodes"])
@@ -547,7 +576,7 @@ def main():
         if existing_manifest.reward_contract != PUSH_REWARD_CONTRACT:
             raise ValueError(
                 f"{checkpoint_dir} uses reward contract "
-                f"{existing_manifest.reward_contract}; sparse push training requires "
+                f"{existing_manifest.reward_contract}; phased dense push training requires "
                 "a fresh checkpoint directory"
             )
         existing_dim = existing_manifest.algorithm_config.get("observation_dim")
@@ -722,6 +751,7 @@ def main():
             metrics = {
                 "rollout/elapsed_seconds": info.get("elapsed_seconds"),
                 "rollout/push_success": info.get("push_success"),
+                "rollout/curriculum_success": info.get("curriculum_success"),
                 "rollout/block_goal_distance": info.get("block_goal_distance"),
                 "rollout/block_goal_progress": info.get("block_goal_progress"),
                 "rollout/red_block_visible": info.get("red_block_visible"),
@@ -733,8 +763,15 @@ def main():
                 "rollout/action_saturation": info.get("action_saturation"),
                 "rollout/push_potential": info.get("push_potential"),
                 "rollout/potential_shaping": info.get("potential_shaping"),
-                "rollout/robot_push_pose_distance": info.get(
-                    "robot_push_pose_distance"
+                "rollout/robot_block_distance": info.get("robot_block_distance"),
+                "rollout/robot_block_contact": info.get("robot_block_contact"),
+                "rollout/contact_acquired": info.get("contact_acquired"),
+                "rollout/contact_bonus": info.get("contact_bonus"),
+                "rollout/approach_completion_bonus": info.get(
+                    "approach_completion_bonus"
+                ),
+                "rollout/goal_completion_bonus": info.get(
+                    "goal_completion_bonus"
                 ),
                 "rollout/time_cost": info.get("time_cost"),
                 "rollout/collision_penalty": info.get("collision_penalty"),
@@ -825,11 +862,17 @@ def main():
         info_keywords=(
             "raw_reward",
             "push_success",
+            "curriculum_success",
             "block_goal_distance",
             "block_goal_progress",
             "push_potential",
             "potential_shaping",
-            "robot_push_pose_distance",
+            "robot_block_distance",
+            "robot_block_contact",
+            "contact_acquired",
+            "contact_bonus",
+            "approach_completion_bonus",
+            "goal_completion_bonus",
             "red_block_visible",
             "green_goal_visible",
             "push_layout_randomized",
@@ -920,6 +963,14 @@ def main():
             "curriculum_window": args.curriculum_window,
             "curriculum_min_stage_steps": args.curriculum_min_stage_steps,
             "curriculum_goal_jitter_radius": args.curriculum_goal_jitter_radius,
+            "reward_contract": PUSH_REWARD_CONTRACT,
+            "push_time_penalty_per_second": PUSH_TIME_PENALTY_PER_SECOND,
+            "push_approach_potential_scale": PUSH_APPROACH_POTENTIAL_SCALE,
+            "push_goal_potential_offset": PUSH_GOAL_POTENTIAL_OFFSET,
+            "push_goal_potential_scale": PUSH_GOAL_POTENTIAL_SCALE,
+            "push_contact_bonus": PUSH_CONTACT_BONUS,
+            "push_approach_completion_bonus": PUSH_APPROACH_COMPLETION_BONUS,
+            "push_goal_completion_bonus": PUSH_GOAL_COMPLETION_BONUS,
         }
         if manifest.reward_contract != PUSH_REWARD_CONTRACT:
             raise ValueError(

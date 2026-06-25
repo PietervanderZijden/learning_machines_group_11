@@ -18,13 +18,18 @@ class _LayoutSim:
         self.positions = {
             1: [-3.50, 0.80, 0.025],
             2: [-2.90, 0.80, 0.005],
+            3: [-3.125, 0.80, 0.05],
         }
+        self.orientations = {3: [0.0, 0.0, 0.0]}
 
     def getObjectPosition(self, handle, _world):
         return list(self.positions[handle])
 
     def setObjectPosition(self, handle, position):
         self.positions[handle] = list(position)
+
+    def setObjectOrientation(self, handle, orientation):
+        self.orientations[handle] = list(orientation)
 
     def resetDynamicObject(self, _handle):
         pass
@@ -40,7 +45,7 @@ def _layout_env(stage):
         push_min_robot_distance=0.25,
         push_min_block_goal_distance=0.25,
     )
-    env.rob = type("Rob", (), {"_sim": _LayoutSim()})()
+    env.rob = type("Rob", (), {"_sim": _LayoutSim(), "_robobo": 3})()
     env._is_simulation = True
     env._red_block_handle = 1
     env._green_goal_handle = 2
@@ -52,6 +57,8 @@ def _layout_env(stage):
     env._push_layout_mode = "full"
     env._authored_red_block_pose = (-3.50, 0.80, 0.025)
     env._authored_green_goal_pose = (-2.90, 0.80, 0.005)
+    env._authored_robot_pose = (-3.125, 0.80, 0.05)
+    env._authored_robot_orientation = (0.0, 0.0, 0.0)
     return env
 
 
@@ -106,6 +113,17 @@ def test_curriculum_round_trip_restores_stage_and_ignores_start_stage(tmp_path):
     assert json.loads(path.read_text())["promotion_history"]
 
 
+def test_curriculum_rejects_legacy_sparse_state(tmp_path):
+    path = tmp_path / "curriculum_state.json"
+    path.write_text(json.dumps({"version": 1, "stage": 0}))
+    try:
+        PushCurriculumController.load(path, PushCurriculumConfig())
+    except ValueError as exc:
+        assert "fresh run" in str(exc)
+    else:
+        raise AssertionError("legacy curriculum state should be rejected")
+
+
 def test_no_curriculum_starts_in_full_stage():
     controller = PushCurriculumController(
         PushCurriculumConfig(enabled=False, start_stage=0)
@@ -113,18 +131,18 @@ def test_no_curriculum_starts_in_full_stage():
     assert controller.stage == 2
 
 
-def test_fixed_layout_restores_authored_poses_exactly():
+def test_approach_stage_restores_authored_object_poses():
     env = _layout_env(0)
     env.rob._sim.positions[1] = [-3.0, 0.5, 0.025]
     env.rob._sim.positions[2] = [-3.0, 1.2, 0.005]
     env._randomize_push_layout()
     assert env.rob._sim.positions[1] == [-3.50, 0.80, 0.025]
     assert env.rob._sim.positions[2] == [-2.90, 0.80, 0.005]
-    assert env._push_layout_mode == "fixed"
+    assert env._push_layout_mode == "approach"
     assert not env._push_layout_randomized
 
 
-def test_goal_jitter_keeps_block_fixed_and_goal_within_radius():
+def test_push_stage_jitters_goal_and_starts_robot_behind_block():
     env = _layout_env(1)
     env._randomize_push_layout()
     block = env.rob._sim.positions[1]
@@ -132,7 +150,17 @@ def test_goal_jitter_keeps_block_fixed_and_goal_within_radius():
     assert block == [-3.50, 0.80, 0.025]
     assert math.dist(goal[:2], [-2.90, 0.80]) <= 0.20 + 1e-9
     assert env._valid_push_layout(tuple(block[:2]), tuple(goal[:2]))
-    assert env._push_layout_mode == "goal_jitter"
+    robot = env.rob._sim.positions[3]
+    direction = (
+        (goal[0] - block[0]) / math.dist(goal[:2], block[:2]),
+        (goal[1] - block[1]) / math.dist(goal[:2], block[:2]),
+    )
+    expected_robot = [
+        block[0] - env.config.push_standoff_distance * direction[0],
+        block[1] - env.config.push_standoff_distance * direction[1],
+    ]
+    assert robot[:2] == expected_robot
+    assert env._push_layout_mode == "push"
 
 
 def test_sac_promotion_is_applied_before_vectorized_auto_reset(tmp_path):
@@ -152,16 +180,18 @@ def test_sac_promotion_is_applied_before_vectorized_auto_reset(tmp_path):
     )
     env._base_env._push_geometry = lambda: (
         (-0.22, 0.0),
-        (0.90, 0.0),
+        (0.0, 0.0),
         (1.00, 0.0),
     )
+    env._base_env._robot_block_contact = lambda: True
     try:
         env.reset()
         _, reward, terminated, truncated, info = env.step(
             np.zeros(2, dtype=np.float32)
         )
-        assert reward == 1.0
+        assert reward > 0.0
         assert terminated and not truncated
+        assert info["curriculum_success"] == 1.0
         assert info["curriculum_promoted"] == 1.0
         assert env._config.push_curriculum_stage == 1
         assert env._domain_wrapper.enabled is False
