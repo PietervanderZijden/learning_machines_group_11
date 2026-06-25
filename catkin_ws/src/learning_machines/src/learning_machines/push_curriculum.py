@@ -1,4 +1,4 @@
-"""Shared sparse-reward push curriculum state."""
+"""Shared phased dense-reward push curriculum state."""
 from __future__ import annotations
 
 import json
@@ -7,8 +7,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
-PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
-PUSH_STAGE_NAMES = ("fixed", "goal_jitter", "full")
+PUSH_REWARD_CONTRACT = "robobo-push-phased-dense-v1"
+PUSH_STAGE_NAMES = ("approach", "push", "full")
+PUSH_CURRICULUM_STATE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,7 @@ class PushCurriculumController:
 
     def to_dict(self) -> dict:
         return {
-            "version": 1,
+            "version": PUSH_CURRICULUM_STATE_VERSION,
             "config": asdict(self.config),
             "stage": self.stage,
             "stage_name": self.stage_name,
@@ -124,6 +125,12 @@ class PushCurriculumController:
         cls, path: str | Path, config: PushCurriculumConfig
     ) -> "PushCurriculumController":
         data = json.loads(Path(path).read_text())
+        version = int(data.get("version", 1))
+        if version != PUSH_CURRICULUM_STATE_VERSION:
+            raise ValueError(
+                "persisted push curriculum uses an incompatible reward/stage "
+                f"contract (version {version}); start a fresh run"
+            )
         controller = cls(config)
         controller.stage = int(data["stage"])
         if controller.stage not in range(len(PUSH_STAGE_NAMES)):

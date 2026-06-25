@@ -25,7 +25,14 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
+PUSH_REWARD_CONTRACT = "robobo-push-phased-dense-v1"
+PUSH_TIME_PENALTY_PER_SECOND = 0.05
+PUSH_APPROACH_POTENTIAL_SCALE = 2.0
+PUSH_GOAL_POTENTIAL_OFFSET = 2.0
+PUSH_GOAL_POTENTIAL_SCALE = 4.0
+PUSH_CONTACT_BONUS = 1.0
+PUSH_APPROACH_COMPLETION_BONUS = 5.0
+PUSH_GOAL_COMPLETION_BONUS = 15.0
 DREAMER_CAMERA_EXPOSURE_RANGE = (0.0, 0.0)
 DREAMER_IMAGE_NOISE_STD = 0.005
 
@@ -318,7 +325,7 @@ def main():
         "--reward-event-fraction",
         type=float,
         default=0.25,
-        help="Fraction of replay sequences sampled around sparse success events.",
+        help="Fraction of replay sequences sampled around large reward events.",
     )
     parser.add_argument(
         "--reward-event-threshold",
@@ -523,7 +530,7 @@ def main():
         if existing_manifest.reward_contract != PUSH_REWARD_CONTRACT:
             raise ValueError(
                 f"{checkpoint_dir} uses reward contract "
-                f"{existing_manifest.reward_contract}; sparse push training requires "
+                f"{existing_manifest.reward_contract}; phased dense push training requires "
                 "a fresh checkpoint directory"
             )
     if curriculum_state_path.exists() and not args.resume:
@@ -559,6 +566,13 @@ def main():
         push_curriculum_stage=curriculum.stage,
         push_goal_jitter_radius=args.curriculum_goal_jitter_radius,
         push_discount=cfg.gamma,
+        push_time_penalty_per_second=PUSH_TIME_PENALTY_PER_SECOND,
+        push_approach_potential_scale=PUSH_APPROACH_POTENTIAL_SCALE,
+        push_goal_potential_offset=PUSH_GOAL_POTENTIAL_OFFSET,
+        push_goal_potential_scale=PUSH_GOAL_POTENTIAL_SCALE,
+        push_contact_bonus=PUSH_CONTACT_BONUS,
+        push_approach_completion_bonus=PUSH_APPROACH_COMPLETION_BONUS,
+        push_goal_completion_bonus=PUSH_GOAL_COMPLETION_BONUS,
     )
     rob_env = RoboboCompactEnv(config=env_config)
     randomization_ranges = RandomizationRanges()
@@ -653,6 +667,34 @@ def main():
                 manifest.algorithm_config.get("curriculum_min_stage_steps"),
                 args.curriculum_min_stage_steps,
             ),
+            "push_time_penalty_per_second": (
+                manifest.algorithm_config.get("push_time_penalty_per_second"),
+                PUSH_TIME_PENALTY_PER_SECOND,
+            ),
+            "push_approach_potential_scale": (
+                manifest.algorithm_config.get("push_approach_potential_scale"),
+                PUSH_APPROACH_POTENTIAL_SCALE,
+            ),
+            "push_goal_potential_offset": (
+                manifest.algorithm_config.get("push_goal_potential_offset"),
+                PUSH_GOAL_POTENTIAL_OFFSET,
+            ),
+            "push_goal_potential_scale": (
+                manifest.algorithm_config.get("push_goal_potential_scale"),
+                PUSH_GOAL_POTENTIAL_SCALE,
+            ),
+            "push_contact_bonus": (
+                manifest.algorithm_config.get("push_contact_bonus"),
+                PUSH_CONTACT_BONUS,
+            ),
+            "push_approach_completion_bonus": (
+                manifest.algorithm_config.get("push_approach_completion_bonus"),
+                PUSH_APPROACH_COMPLETION_BONUS,
+            ),
+            "push_goal_completion_bonus": (
+                manifest.algorithm_config.get("push_goal_completion_bonus"),
+                PUSH_GOAL_COMPLETION_BONUS,
+            ),
         }
         manifest_mismatches = {
             key: values
@@ -735,7 +777,7 @@ def main():
 
             if done:
                 promotion = curriculum.record_episode(
-                    bool(info.get("push_success", 0.0))
+                    bool(info.get("curriculum_success", 0.0))
                 )
                 curriculum.save(curriculum_state_path)
                 apply_curriculum()
@@ -884,7 +926,7 @@ def main():
             logger.update(1)
 
             if done:
-                success = float(info.get("push_success", 0.0))
+                success = float(info.get("curriculum_success", 0.0))
                 episode_stage = curriculum.stage
                 promotion = curriculum.record_episode(bool(success))
                 if promotion is not None:
@@ -957,13 +999,20 @@ def main():
                     "episode/return": float(episode_reward),
                     "episode/length": int(episode_length),
                     "episode/elapsed_seconds": float(info.get("elapsed_seconds", episode_length * 0.4)),
-                    "episode/push_success": success,
+                    "episode/curriculum_success": success,
+                    "episode/push_success": float(info.get("push_success", 0.0)),
                     "episode/block_goal_distance": float(info.get("block_goal_distance", np.nan)),
                     "episode/block_goal_progress": float(info.get("block_goal_progress", 0.0)),
                     "episode/push_potential": float(info.get("push_potential", np.nan)),
                     "episode/potential_shaping": float(info.get("potential_shaping", 0.0)),
-                    "episode/robot_push_pose_distance": float(
-                        info.get("robot_push_pose_distance", np.nan)
+                    "episode/robot_block_distance": float(
+                        info.get("robot_block_distance", np.nan)
+                    ),
+                    "episode/robot_block_contact": float(
+                        info.get("robot_block_contact", 0.0)
+                    ),
+                    "episode/contact_acquired": float(
+                        info.get("contact_acquired", 0.0)
                     ),
                     "episode/red_block_visible": float(info.get("red_block_visible", 0.0)),
                     "episode/green_goal_visible": float(info.get("green_goal_visible", 0.0)),
@@ -1000,7 +1049,7 @@ def main():
                 if wandb_run is not None:
                     wandb_payload = dict(episode_metrics)
                     wandb_payload["curriculum/stage_name"] = (
-                        "fixed", "goal_jitter", "full"
+                        "approach", "push", "full"
                     )[episode_stage]
                     wandb_payload["curriculum/object_randomization_mode"] = info.get(
                         "push_layout_mode"
@@ -1037,7 +1086,7 @@ def main():
                         "reward_contract": np.array(PUSH_REWARD_CONTRACT),
                         "curriculum_stage": np.array(episode_stage),
                         "curriculum_stage_name": np.array(
-                            ("fixed", "goal_jitter", "full")[episode_stage]
+                            ("approach", "push", "full")[episode_stage]
                         ),
                         "push_layout_mode": np.array(
                             info.get("push_layout_mode", "full")
@@ -1231,6 +1280,13 @@ def main():
                 "curriculum_window": args.curriculum_window,
                 "curriculum_min_stage_steps": args.curriculum_min_stage_steps,
                 "curriculum_goal_jitter_radius": args.curriculum_goal_jitter_radius,
+                "push_time_penalty_per_second": PUSH_TIME_PENALTY_PER_SECOND,
+                "push_approach_potential_scale": PUSH_APPROACH_POTENTIAL_SCALE,
+                "push_goal_potential_offset": PUSH_GOAL_POTENTIAL_OFFSET,
+                "push_goal_potential_scale": PUSH_GOAL_POTENTIAL_SCALE,
+                "push_contact_bonus": PUSH_CONTACT_BONUS,
+                "push_approach_completion_bonus": PUSH_APPROACH_COMPLETION_BONUS,
+                "push_goal_completion_bonus": PUSH_GOAL_COMPLETION_BONUS,
             },
         ).save(checkpoint_dir / "manifest.json")
         logger.close()

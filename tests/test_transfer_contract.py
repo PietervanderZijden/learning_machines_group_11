@@ -530,9 +530,14 @@ def _dense_push_env(geometry, **config_overrides):
         **config_overrides,
     )
     env._push_layout_randomized = False
+    env._push_layout_mode = "full"
+    env._contact_acquired = env.config.push_curriculum_stage == 1
     env._previous_block_goal_distance = env._geometry_block_goal_distance(geometry)
-    env._previous_push_potential = env._push_potential(geometry)
+    env._previous_push_potential = env._push_potential(
+        geometry, contact_acquired=env._contact_acquired
+    )
     env._push_geometry = lambda: geometry
+    env._robot_block_contact = lambda: False
     return env
 
 
@@ -543,54 +548,102 @@ def _visible_push_obs():
     }
 
 
-def test_sparse_push_non_success_diagnostics_never_change_reward():
+def test_push_contact_uses_respondable_robot_shapes():
+    class ContactSim:
+        handle_world = -1
+        object_shape_type = 0
+        shapeintparam_respondable = 1
+
+        def getObjectPosition(self, handle, _world):
+            return [float(handle), 0.0, 0.0]
+
+        def getObjectsInTree(self, _root, _kind, _options):
+            return [10, 11]
+
+        def getObjectInt32Param(self, handle, _parameter):
+            return int(handle == 11)
+
+        def checkCollision(self, robot_shape, block):
+            return int(robot_shape == 11 and block == 1)
+
+    env = RoboboCompactEnv.__new__(RoboboCompactEnv)
+    env.rob = type("Rob", (), {"_sim": ContactSim(), "_robobo": 3})()
+    env._is_simulation = True
+    env._red_block_handle = 1
+    env._green_goal_handle = 2
+    env._robot_respondable_handles = ()
+
+    assert env._robot_block_contact()
+    assert env._robot_respondable_handles == (11,)
+
+
+def test_dense_push_rewards_approach_before_contact():
     start = ((-0.50, 0.0), (0.0, 0.0), (1.0, 0.0))
     approach = ((-0.30, 0.0), (0.0, 0.0), (1.0, 0.0))
-    push = ((-0.08, 0.0), (0.15, 0.0), (1.0, 0.0))
 
-    approach_env = _dense_push_env(start)
-    approach_env._push_geometry = lambda: approach
-    approach_reward, approach_done, approach_info = approach_env._push_reward(
+    env = _dense_push_env(start, push_curriculum_stage=2)
+    env._push_geometry = lambda: approach
+    reward, done, info = env._push_reward(
         _visible_push_obs(), 0.4, False, 0.0
     )
 
-    push_env = _dense_push_env(approach)
-    push_env._push_geometry = lambda: push
-    push_reward, push_done, push_info = push_env._push_reward(
+    assert not done
+    assert reward > 0.0
+    assert info["push_phase"] == 0.0
+    assert info["potential_shaping"] > info["time_cost"]
+    assert info["goal_completion_bonus"] == 0.0
+
+
+def test_dense_push_contact_latches_and_switches_to_goal_progress():
+    start = ((-0.50, 0.0), (0.0, 0.0), (1.0, 0.0))
+    contact = ((-0.20, 0.0), (0.0, 0.0), (1.0, 0.0))
+    pushed = ((0.02, 0.0), (0.20, 0.0), (1.0, 0.0))
+    env = _dense_push_env(start, push_curriculum_stage=2)
+    env._push_geometry = lambda: contact
+    env._robot_block_contact = lambda: True
+
+    contact_reward, contact_done, contact_info = env._push_reward(
+        _visible_push_obs(), 0.4, False, 0.0
+    )
+    env._push_geometry = lambda: pushed
+    env._robot_block_contact = lambda: False
+    push_reward, push_done, push_info = env._push_reward(
         _visible_push_obs(), 0.4, False, 0.0
     )
 
-    assert not approach_done
-    assert not push_done
-    assert approach_info["potential_shaping"] == 0.0
-    assert push_info["potential_shaping"] == 0.0
-    assert approach_reward == 0.0
-    assert push_reward == 0.0
+    assert not contact_done and not push_done
+    assert contact_reward > 0.0
+    assert contact_info["contact_bonus"] == 1.0
+    assert contact_info["contact_acquired"] == 1.0
+    assert push_info["contact_acquired"] == 1.0
+    assert push_info["robot_block_contact"] == 0.0
+    assert push_reward > 0.0
 
 
-def test_sparse_push_collision_elapsed_time_and_action_change_are_diagnostics_only():
+def test_approach_curriculum_terminates_on_first_contact():
     start = ((-0.50, 0.0), (0.0, 0.0), (1.0, 0.0))
-    approach = ((-0.30, 0.0), (0.0, 0.0), (1.0, 0.0))
-    baseline = _dense_push_env(
-        start,
-        push_block_goal_weight=2.0,
-        push_robot_pose_weight=1.0,
+    contact = ((-0.20, 0.0), (0.0, 0.0), (1.0, 0.0))
+    env = _dense_push_env(start, push_curriculum_stage=0)
+    env._push_geometry = lambda: contact
+    env._robot_block_contact = lambda: True
+
+    reward, terminated, info = env._push_reward(
+        _visible_push_obs(), 0.4, False, 0.0
     )
-    baseline._push_geometry = lambda: approach
-    reward, terminated, info = baseline._push_reward(
-        _visible_push_obs(), 9.0, True, 2.0
-    )
-    assert not terminated
-    assert reward == 0.0
-    assert info["time_cost"] == 0.0
-    assert info["collision_penalty"] == 0.0
-    assert info["action_change_penalty"] == 0.0
+
+    assert terminated
+    assert reward > 0.0
+    assert info["curriculum_success"] == 1.0
+    assert info["push_success"] == 0.0
+    assert info["approach_completion_bonus"] == 5.0
 
 
-def test_sparse_push_success_returns_exactly_one_and_terminates():
+def test_dense_push_goal_success_has_dominant_terminal_bonus():
     start = ((0.58, 0.0), (0.80, 0.0), (1.0, 0.0))
     success = ((0.70, 0.0), (0.83, 0.0), (1.0, 0.0))
-    env = _dense_push_env(start, push_success_distance=0.18)
+    env = _dense_push_env(
+        start, push_success_distance=0.18, push_curriculum_stage=1
+    )
     env._push_geometry = lambda: success
 
     reward, terminated, info = env._push_reward(
@@ -599,13 +652,31 @@ def test_sparse_push_success_returns_exactly_one_and_terminates():
 
     assert terminated
     assert info["push_success"] == 1.0
-    assert reward == 1.0
-    assert info["potential_shaping"] == 0.0
+    assert info["curriculum_success"] == 1.0
+    assert info["goal_completion_bonus"] == 15.0
+    assert reward > 8.0
 
 
-def test_sparse_push_discount_favors_earlier_success():
+def test_dense_push_tiny_progress_cannot_be_repeatedly_farmed():
+    start = ((-0.20, 0.0), (0.0, 0.0), (1.0, 0.0))
+    tiny_push = ((-0.19, 0.0), (0.01, 0.0), (1.0, 0.0))
+    env = _dense_push_env(start, push_curriculum_stage=1)
+    env._push_geometry = lambda: tiny_push
+    first, _, _ = env._push_reward(_visible_push_obs(), 0.4, False, 0.0)
+    second, _, _ = env._push_reward(_visible_push_obs(), 0.4, False, 0.0)
+
+    assert first > second
+    assert second < 0.0
+
+
+def test_dense_push_faster_completion_scores_higher():
     gamma = 0.997
-    assert gamma**10 > gamma**20 > 0.0
+    terminal_reward = 10.0
+    step_cost = 0.02
+    fast = -step_cost + gamma * terminal_reward
+    slow = sum(gamma**step * -step_cost for step in range(10))
+    slow += gamma**10 * terminal_reward
+    assert fast > slow
 
 
 def test_push_success_takes_precedence_on_final_allowed_step():

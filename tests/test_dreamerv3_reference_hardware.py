@@ -23,11 +23,16 @@ from showcase_dreamerv3_reference import episode_summary
 
 def _reference_contract():
     return {
-        "reward_contract": "robobo-push-sparse-v1",
+        "reward_contract": "robobo-push-phased-dense-v1",
         "max_episode_steps": 200,
         "discount": 0.997,
-        "push_block_goal_weight": 20.0,
-        "push_robot_pose_weight": 10.0,
+        "push_time_penalty_per_second": 0.05,
+        "push_approach_potential_scale": 2.0,
+        "push_goal_potential_offset": 2.0,
+        "push_goal_potential_scale": 4.0,
+        "push_contact_bonus": 1.0,
+        "push_approach_completion_bonus": 5.0,
+        "push_goal_completion_bonus": 15.0,
         "action_smoothing": False,
         "pre_action_safety": False,
         "max_action_delta": 2.0,

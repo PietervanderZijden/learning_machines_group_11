@@ -103,6 +103,7 @@ def test_nm512_wrapper_advertises_actual_96_pixel_image_shape():
     assert wrapper.observation_space["image"].shape == (96, 96, 3)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="reference encoder defaults to CUDA")
 def test_reference_multimodal_encoder_declared_width_matches_96_pixel_output():
     import networks
 
@@ -242,7 +243,10 @@ def test_nm512_wrapper_promotes_curriculum_before_next_reset(tmp_path):
                 1.0,
                 True,
                 False,
-                {"block_goal_distance": 0.0},
+                    {
+                        "block_goal_distance": 0.0,
+                        "curriculum_success": 1.0,
+                    },
             )
 
     controller = PushCurriculumController(
@@ -367,7 +371,7 @@ def test_reference_checkpoint_restores_optimizer_state():
 
 
 def test_reference_checkpoint_is_atomic_and_validated(tmp_path):
-    contract = {"reward_contract": "robobo-push-sparse-v1"}
+    contract = {"reward_contract": "robobo-push-phased-dense-v1"}
     path = tmp_path / "latest.pt"
     checkpoint = {
         "checkpoint_version": REFERENCE_CHECKPOINT_VERSION,
@@ -396,7 +400,7 @@ def test_reference_checkpoint_rejects_replay_step_mismatch():
         "agent_state_dict": {},
         "optims_state_dict": {},
         "training_step": 4000,
-        "reward_contract": {"reward_contract": "robobo-push-sparse-v1"},
+        "reward_contract": {"reward_contract": "robobo-push-phased-dense-v1"},
     }
 
     with pytest.raises(ValueError, match="checkpoint/replay step mismatch"):
@@ -413,7 +417,7 @@ def test_reference_checkpoint_allows_one_partial_episode_of_replay_lag():
         "agent_state_dict": {},
         "optims_state_dict": {},
         "training_step": 4000,
-        "reward_contract": {"reward_contract": "robobo-push-sparse-v1"},
+        "reward_contract": {"reward_contract": "robobo-push-phased-dense-v1"},
     }
 
     validate_checkpoint(
@@ -437,7 +441,7 @@ def test_reference_checkpoint_allows_replay_ahead_within_training_block():
         "agent_state_dict": {},
         "optims_state_dict": {},
         "training_step": 25_000,
-        "reward_contract": {"reward_contract": "robobo-push-sparse-v1"},
+        "reward_contract": {"reward_contract": "robobo-push-phased-dense-v1"},
     }
 
     validate_checkpoint(
@@ -455,7 +459,7 @@ def test_reference_checkpoint_rejects_replay_ahead_beyond_training_block():
         "agent_state_dict": {},
         "optims_state_dict": {},
         "training_step": 25_000,
-        "reward_contract": {"reward_contract": "robobo-push-sparse-v1"},
+        "reward_contract": {"reward_contract": "robobo-push-phased-dense-v1"},
     }
 
     with pytest.raises(ValueError, match="allowed replay lead is 5000"):

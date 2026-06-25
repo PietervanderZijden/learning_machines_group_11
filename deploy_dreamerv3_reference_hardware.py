@@ -18,7 +18,7 @@ import numpy as np
 
 REFERENCE_SOURCE_COMMIT = "6ef8646d807cd10ce0c88e10a7e943211e7fc44c"
 REFERENCE_CHECKPOINT_VERSION = 1
-REFERENCE_REWARD_CONTRACT = "robobo-push-sparse-v1"
+REFERENCE_REWARD_CONTRACT = "robobo-push-phased-dense-v1"
 REFERENCE_IMAGE_SIZE = (96, 96)
 MAX_DEPLOY_WHEEL_SPEED = 70
 RAISED_WHEEL_CONFIRMATION = "WHEELS RAISED"
@@ -235,6 +235,13 @@ def load_reference_contract(checkpoint: dict[str, Any]) -> dict[str, Any]:
     expected = {
         "reward_contract": REFERENCE_REWARD_CONTRACT,
         "image_size": list(REFERENCE_IMAGE_SIZE),
+        "push_time_penalty_per_second": 0.05,
+        "push_approach_potential_scale": 2.0,
+        "push_goal_potential_offset": 2.0,
+        "push_goal_potential_scale": 4.0,
+        "push_contact_bonus": 1.0,
+        "push_approach_completion_bonus": 5.0,
+        "push_goal_completion_bonus": 15.0,
         "action_smoothing": False,
         "pre_action_safety": False,
         "max_action_delta": 2.0,

@@ -80,11 +80,12 @@ class ReplayBuffer:
                     if (
                         observation_contract == "robobo-push-obs-v1"
                         and reward_contract
-                        and reward_contract != "robobo-push-sparse-v1"
+                        and reward_contract != "robobo-push-phased-dense-v1"
                     ):
                         raise ValueError(
                             f"incompatible recorded push reward contract "
-                            f"{reward_contract}; expected robobo-push-sparse-v1"
+                            f"{reward_contract}; expected "
+                            "robobo-push-phased-dense-v1"
                         )
                     valid = (
                         "images" in data
@@ -94,7 +95,7 @@ class ReplayBuffer:
                         and data.get("observation_contract", np.array("")).item()
                         == "robobo-push-obs-v1"
                         and data.get("reward_contract", np.array("")).item()
-                        == "robobo-push-sparse-v1"
+                        == "robobo-push-phased-dense-v1"
                         and np.isclose(
                             data.get(
                                 "control_interval_seconds", np.array(-1.0)

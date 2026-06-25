@@ -118,7 +118,9 @@ class RoboboNM512Wrapper(gym.Env):
             controller.record_transition()
             episode_stage = controller.stage
             if done:
-                promotion = controller.record_episode(bool(terminated))
+                promotion = controller.record_episode(
+                    bool(info.get("curriculum_success", 0.0))
+                )
                 if promotion is not None:
                     stage_steps = promotion["stage_steps"]
                     stage_episodes = promotion["episodes"]
@@ -173,6 +175,15 @@ class RoboboNM512Wrapper(gym.Env):
                 info.get("potential_shaping", 0.0)
             ),
             "log_sum_time_cost": np.float32(info.get("time_cost", 0.0)),
+            "log_avg_robot_block_distance": np.float32(
+                info.get("robot_block_distance", 0.0)
+            ),
+            "log_avg_robot_block_contact": np.float32(
+                info.get("robot_block_contact", 0.0)
+            ),
+            "log_avg_contact_acquired": np.float32(
+                info.get("contact_acquired", 0.0)
+            ),
         })
         if episode_stage is not None:
             controller = self._curriculum_controller

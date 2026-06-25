@@ -125,19 +125,31 @@ def main(argv=None) -> None:
             max_wheel_speed=args.max_wheel_speed,
             calibration_profile=calibration,
             randomize_push_layout=False,
-            push_curriculum_stage=0,
+            push_curriculum_stage=2,
             action_smoothing=False,
             pre_action_safety=False,
             max_action_delta=2.0,
             push_discount=float(policy.contract["discount"]),
-            push_block_goal_weight=float(
-                policy.contract["push_block_goal_weight"]
+            push_approach_potential_scale=float(
+                policy.contract["push_approach_potential_scale"]
             ),
-            push_robot_pose_weight=float(
-                policy.contract["push_robot_pose_weight"]
+            push_goal_potential_offset=float(
+                policy.contract["push_goal_potential_offset"]
+            ),
+            push_goal_potential_scale=float(
+                policy.contract["push_goal_potential_scale"]
+            ),
+            push_contact_bonus=float(policy.contract["push_contact_bonus"]),
+            push_approach_completion_bonus=float(
+                policy.contract["push_approach_completion_bonus"]
+            ),
+            push_goal_completion_bonus=float(
+                policy.contract["push_goal_completion_bonus"]
             ),
             push_standoff_distance=0.22,
-            push_time_penalty_per_second=2.5,
+            push_time_penalty_per_second=float(
+                policy.contract["push_time_penalty_per_second"]
+            ),
             push_action_change_penalty=0.0,
         ),
     )

@@ -205,6 +205,14 @@ def test_v3_replay_bootstraps_time_limit_boundaries():
 def test_reference_wrapper_distinguishes_timeout_from_terminal_discount():
     class FakeEnv(gym.Env):
         action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        observation_space = gym.spaces.Dict({
+            "image": gym.spaces.Box(
+                0, 255, shape=(3, 64, 64), dtype=np.uint8
+            ),
+            "ir": gym.spaces.Box(
+                0.0, 1.0, shape=(8,), dtype=np.float32
+            ),
+        })
 
         def __init__(self, terminated, truncated):
             self.terminated = terminated
@@ -231,6 +239,14 @@ def test_reference_wrapper_distinguishes_timeout_from_terminal_discount():
 def test_reference_wrapper_reports_executed_action_spin_diagnostics():
     class FakeEnv(gym.Env):
         action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        observation_space = gym.spaces.Dict({
+            "image": gym.spaces.Box(
+                0, 255, shape=(3, 64, 64), dtype=np.uint8
+            ),
+            "ir": gym.spaces.Box(
+                0.0, 1.0, shape=(8,), dtype=np.float32
+            ),
+        })
 
         def step(self, action):
             obs = {
@@ -293,7 +309,7 @@ def test_v3_replay_restores_recent_aligned_recordings(tmp_path):
             dones=np.array([False, False, True]),
             terminals=np.array([False, False, index == 2]),
             observation_contract=np.array("robobo-push-obs-v1"),
-            reward_contract=np.array("robobo-push-sparse-v1"),
+            reward_contract=np.array("robobo-push-phased-dense-v1"),
             control_interval_seconds=np.array(0.4),
         )
     buffer = ReplayBuffer(
@@ -346,7 +362,7 @@ def test_v3_replay_state_round_trip_preserves_complete_buffer():
     )
 
 
-def test_v3_replay_rejects_dense_push_recordings(tmp_path):
+def test_v3_replay_rejects_legacy_push_recordings(tmp_path):
     episode_dir = tmp_path / "episodes"
     episode_dir.mkdir()
     np.savez_compressed(

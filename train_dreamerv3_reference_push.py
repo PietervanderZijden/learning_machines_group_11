@@ -62,9 +62,14 @@ from parallel import Damy
 from rl_robobo_compact_env import RoboboCompactEnv, RoboboCompactEnvConfig
 from robobo_env_wrapper import RoboboNM512Wrapper
 
-PUSH_REWARD_CONTRACT = "robobo-push-sparse-v1"
-PUSH_BLOCK_GOAL_WEIGHT = 20.0
-PUSH_ROBOT_POSE_WEIGHT = 10.0
+PUSH_REWARD_CONTRACT = "robobo-push-phased-dense-v1"
+PUSH_TIME_PENALTY_PER_SECOND = 0.05
+PUSH_APPROACH_POTENTIAL_SCALE = 2.0
+PUSH_GOAL_POTENTIAL_OFFSET = 2.0
+PUSH_GOAL_POTENTIAL_SCALE = 4.0
+PUSH_CONTACT_BONUS = 1.0
+PUSH_APPROACH_COMPLETION_BONUS = 5.0
+PUSH_GOAL_COMPLETION_BONUS = 15.0
 REFERENCE_IMAGE_SIZE = (96, 96)
 REFERENCE_DYN_HIDDEN = 512
 REFERENCE_DYN_DETER = 1024
@@ -116,10 +121,14 @@ def make_robobo_env(config, curriculum, curriculum_state_path):
         pre_action_safety=False,
         max_action_delta=2.0,
         push_discount=config.discount,
-        push_block_goal_weight=PUSH_BLOCK_GOAL_WEIGHT,
-        push_robot_pose_weight=PUSH_ROBOT_POSE_WEIGHT,
+        push_approach_potential_scale=PUSH_APPROACH_POTENTIAL_SCALE,
+        push_goal_potential_offset=PUSH_GOAL_POTENTIAL_OFFSET,
+        push_goal_potential_scale=PUSH_GOAL_POTENTIAL_SCALE,
+        push_contact_bonus=PUSH_CONTACT_BONUS,
+        push_approach_completion_bonus=PUSH_APPROACH_COMPLETION_BONUS,
+        push_goal_completion_bonus=PUSH_GOAL_COMPLETION_BONUS,
         push_standoff_distance=0.22,
-        push_time_penalty_per_second=2.5,
+        push_time_penalty_per_second=PUSH_TIME_PENALTY_PER_SECOND,
         push_action_change_penalty=0.0,
     )
     from robobo_interface import SimulationRobobo
@@ -339,8 +348,13 @@ def main():
         "reward_contract": PUSH_REWARD_CONTRACT,
         "max_episode_steps": config.time_limit,
         "discount": config.discount,
-        "push_block_goal_weight": PUSH_BLOCK_GOAL_WEIGHT,
-        "push_robot_pose_weight": PUSH_ROBOT_POSE_WEIGHT,
+        "push_time_penalty_per_second": PUSH_TIME_PENALTY_PER_SECOND,
+        "push_approach_potential_scale": PUSH_APPROACH_POTENTIAL_SCALE,
+        "push_goal_potential_offset": PUSH_GOAL_POTENTIAL_OFFSET,
+        "push_goal_potential_scale": PUSH_GOAL_POTENTIAL_SCALE,
+        "push_contact_bonus": PUSH_CONTACT_BONUS,
+        "push_approach_completion_bonus": PUSH_APPROACH_COMPLETION_BONUS,
+        "push_goal_completion_bonus": PUSH_GOAL_COMPLETION_BONUS,
         "action_smoothing": False,
         "pre_action_safety": False,
         "max_action_delta": 2.0,
@@ -453,7 +467,7 @@ def main():
     )
     print(f"  Resume: {cli.resume}")
     print("  Actions: direct (smoothing and pre-action safety disabled)")
-    print("  Reward: sparse success event (0/1)")
+    print("  Reward: phased dense approach/contact/push shaping")
 
     train_eps = tools.load_episodes(
         pathlib.Path(config.traindir), limit=config.dataset_size
