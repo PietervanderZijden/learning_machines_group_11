@@ -18,6 +18,7 @@ from learning_machines.rl_robobo_compact_env import (
     RoboboCompactEnvConfig,
 )
 from tests.test_transfer_contract import _FakeRobobo
+from showcase_dreamerv3_reference import episode_summary
 
 
 def _reference_contract():
@@ -180,3 +181,30 @@ def test_hardware_push_inference_does_not_require_simulator_geometry():
     assert not terminated
     assert truncated
     np.testing.assert_allclose(info["executed_action"], [1.0, 1.0])
+
+
+def test_showcase_episode_summary_reports_success_and_timing():
+    summary = episode_summary(
+        2,
+        1.0,
+        15,
+        True,
+        {
+            "block_goal_distance": 0.12,
+            "collisions": 3,
+            "red_block_visible": 1.0,
+            "green_goal_visible": 0.0,
+        },
+    )
+
+    assert summary == {
+        "episode": 2,
+        "success": True,
+        "reward": 1.0,
+        "steps": 15,
+        "simulated_seconds": 6.0,
+        "block_goal_distance": 0.12,
+        "collisions": 3,
+        "red_block_visible": True,
+        "green_goal_visible": False,
+    }

@@ -23,6 +23,18 @@ before launching. During rollout, enter `e` or `q` and press Enter for an
 emergency stop. A missing wheel service or completion reply is retried with
 the same command after a five-second timeout.
 
+To showcase the same checkpoint in CoppeliaSim, open
+`scenes/arena_push_easy.ttt` on port `23000`, then run:
+
+```bash
+./run_dreamerv3_showcase.sh \
+  dreamerv3_models/dreamerv3-reference/latest.pt \
+  --episodes 3
+```
+
+This runs deterministic fixed-layout evaluation at real-time speed without
+training or domain randomization. Pass `--no-realtime` for fast evaluation.
+
 ### Tech Stack & Environment
 * **Language:** Python 3.8 (managed via `uv`)
 * **Robot Framework:** ROS1 Noetic (fully encapsulated in Docker via OrbStack / Docker Desktop)
