@@ -90,6 +90,7 @@ def validate_checkpoint(
     reward_contract: Mapping[str, Any],
     replay_step: int,
     max_replay_lag: int = 0,
+    max_replay_lead: int = 0,
 ) -> None:
     required = {
         "checkpoint_version",
@@ -116,11 +117,13 @@ def validate_checkpoint(
     checkpoint_step = int(checkpoint["training_step"])
     replay_step = int(replay_step)
     replay_lag = checkpoint_step - replay_step
-    if replay_lag < 0 or replay_lag > max_replay_lag:
+    replay_lead = replay_step - checkpoint_step
+    if replay_lag > max_replay_lag or replay_lead > max_replay_lead:
         raise ValueError(
             "checkpoint/replay step mismatch: checkpoint has "
             f"{checkpoint_step} steps but replay has {replay_step}; "
-            f"allowed replay lag is {max_replay_lag}"
+            f"allowed replay lag is {max_replay_lag} and "
+            f"allowed replay lead is {max_replay_lead}"
         )
 
 
