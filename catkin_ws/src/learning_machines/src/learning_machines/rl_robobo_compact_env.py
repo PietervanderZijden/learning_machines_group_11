@@ -839,7 +839,7 @@ class RoboboCompactEnv(gym.Env):
         orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
         sim.setObjectOrientation(
             robot_handle,
-            [math.atan2(direction[1], direction[0]), orientation[1], orientation[2]],
+            [orientation[0], orientation[1], math.atan2(direction[1], direction[0])],
         )
 
     def _randomize_push_layout(self) -> None:
