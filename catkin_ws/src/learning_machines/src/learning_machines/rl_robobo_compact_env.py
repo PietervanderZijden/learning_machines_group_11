@@ -187,8 +187,6 @@ class RoboboCompactEnv(gym.Env):
         self._green_goal_z = 0.005
         self._push_layout_randomized = False
         self._push_layout_mode = "full"
-        self._saved_joint_positions: dict[int, float] = {}
-        self._tilt_target_radians: float | None = None
         self._authored_red_block_pose: tuple[float, float, float] | None = None
         self._authored_green_goal_pose: tuple[float, float, float] | None = None
         self._authored_robot_pose: tuple[float, float, float] | None = None
@@ -423,17 +421,7 @@ class RoboboCompactEnv(gym.Env):
             time.sleep(self.config.settle_sleep)
             return
 
-        self._saved_joint_positions = {}
         if not self.rob.is_stopped():
-            for joint_attr in ("_pan_motor_joint", "_tilt_motor_joint"):
-                joint_handle = getattr(self.rob, joint_attr, None)
-                if joint_handle is not None:
-                    try:
-                        self._saved_joint_positions[int(joint_handle)] = float(
-                            self.rob._sim.getJointPosition(joint_handle)
-                        )
-                    except Exception:
-                        pass
             self.rob.stop_simulation()
         time.sleep(0.1)
         self.rob.configure_simulation_timing()
@@ -448,13 +436,6 @@ class RoboboCompactEnv(gym.Env):
             self._randomize_food_positions()
         elif self.config.active_food_count is not None:
             self._apply_food_curriculum()
-
-        if self._saved_joint_positions:
-            for joint_handle, position in self._saved_joint_positions.items():
-                try:
-                    self.rob._sim.setJointPosition(joint_handle, position)
-                except Exception:
-                    pass
 
         self.rob.play_simulation()
         self._fix_lifted_food()
@@ -572,35 +553,11 @@ class RoboboCompactEnv(gym.Env):
             actual = self._read_phone_tilt()
 
         if actual is not None and abs(actual - self.config.phone_tilt) > self.config.phone_tilt_tolerance:
-            tilt_joint = getattr(self.rob, "_tilt_motor_joint", None)
-            if tilt_joint is not None and self._tilt_target_radians is not None:
-                try:
-                    self.rob._sim.setJointPosition(tilt_joint, self._tilt_target_radians)
-                    self.rob.step_simulation(1)
-                    actual = self._read_phone_tilt()
-                except Exception:
-                    pass
-        if actual is not None and abs(actual - self.config.phone_tilt) > self.config.phone_tilt_tolerance:
-            if self._tilt_target_radians is None:
-                print(
-                    f"Warning: phone tilt reached {actual}/"
-                    f"{self.config.phone_tilt} on first reset; "
-                    "continuing — motor will catch up during the episode"
-                )
-            else:
-                raise RuntimeError(
-                    f"phone tilt did not reach ground-facing target {self.config.phone_tilt}; "
-                    f"actual={actual}"
-                )
-        else:
-            tilt_joint = getattr(self.rob, "_tilt_motor_joint", None)
-            if tilt_joint is not None:
-                try:
-                    self._tilt_target_radians = float(
-                        self.rob._sim.getJointPosition(tilt_joint)
-                    )
-                except Exception:
-                    pass
+            print(
+                f"Warning: phone tilt reached {actual}/{self.config.phone_tilt} "
+                f"after {steps} steps; continuing — motor will catch up during "
+                "the episode"
+            )
         self._settle(self.config.reset_settle_time)
 
     def _reset_blob_tracker(self) -> None:
@@ -842,12 +799,6 @@ class RoboboCompactEnv(gym.Env):
             robot_handle,
             [math.atan2(direction[1], direction[0]), orientation[1], orientation[2]],
         )
-
-        for joint_handle, position in getattr(self, "_saved_joint_positions", {}).items():
-            try:
-                sim.setJointPosition(joint_handle, position)
-            except Exception:
-                pass
 
     def _randomize_push_layout(self) -> None:
         self._push_layout_randomized = False
