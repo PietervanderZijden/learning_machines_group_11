@@ -235,7 +235,11 @@ class RoboboCompactEnv(gym.Env):
         self._initialize_camera_pose()
         if self._is_simulation:
             self._fix_lifted_food()
-        reset_food_count = self.rob.get_nr_food_collected() if self._is_simulation else 0
+        reset_food_count = (
+            self.rob.get_nr_food_collected()
+            if self._is_simulation and self.config.task == "food_collection"
+            else 0
+        )
         if reset_food_count != 0:
             raise RuntimeError(
                 f"episode reset started with {reset_food_count} collected food items"
