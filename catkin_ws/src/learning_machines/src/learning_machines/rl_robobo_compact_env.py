@@ -837,9 +837,19 @@ class RoboboCompactEnv(gym.Env):
             [robot_xy[0], robot_xy[1], self._authored_robot_pose[2]],
         )
         orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
+        authored_block = self._authored_red_block_pose
+        if authored_block is not None and self._authored_robot_pose is not None:
+            to_block = (
+                authored_block[0] - self._authored_robot_pose[0],
+                authored_block[1] - self._authored_robot_pose[1],
+            )
+            forward_offset = orientation[2] - math.atan2(to_block[1], to_block[0])
+        else:
+            forward_offset = 0.0
+        heading = math.atan2(direction[1], direction[0]) + forward_offset
         sim.setObjectOrientation(
             robot_handle,
-            [orientation[0], orientation[1], math.atan2(direction[1], direction[0])],
+            [orientation[0], orientation[1], heading],
         )
 
     def _randomize_push_layout(self) -> None:
