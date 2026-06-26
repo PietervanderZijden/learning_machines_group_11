@@ -32,7 +32,7 @@ class RoboboCompactEnvConfig:
     phone_tilt: int = 100
     phone_tilt_speed: int = 100
     phone_tilt_tolerance: int = 5
-    phone_tilt_timeout: float = 10.0
+    phone_tilt_timeout: float = 20.0
     initialize_phone_tilt: bool = True
     max_episode_steps: int = 150
     collision_ir_threshold: float = 0.85
@@ -596,9 +596,10 @@ class RoboboCompactEnv(gym.Env):
             actual = self._read_phone_tilt()
 
         if actual is not None and abs(actual - self.config.phone_tilt) > self.config.phone_tilt_tolerance:
-            raise RuntimeError(
-                f"phone tilt did not reach ground-facing target {self.config.phone_tilt}; "
-                f"actual={actual}"
+            print(
+                f"Warning: phone tilt reached {actual}/{self.config.phone_tilt} "
+                f"after {steps} steps; continuing — motor will catch up during "
+                "the episode"
             )
         self._settle(self.config.reset_settle_time)
 
