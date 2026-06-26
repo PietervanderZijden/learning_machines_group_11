@@ -581,6 +581,8 @@ class SimulationRobobo(IRobobo):
         self._tilt_motor_script = self._get_childscript(f"/Robobo{self._identifier}/Pan_Motor/Pan_Respondable/Tilt_Motor")
         self._smartphone_script = self._get_childscript(f"/Robobo{self._identifier}/Pan_Motor/Pan_Respondable/Tilt_Motor/Smartphone_Respondable")
         self._smartphone_camera = self._get_object(f"/Robobo{self._identifier}/Pan_Motor/Pan_Respondable/Tilt_Motor/Smartphone_Respondable/Smartphone_camera")
+        self._pan_motor_joint = self._get_object(f"/Robobo{self._identifier}/Pan_Motor")
+        self._tilt_motor_joint = self._get_object(f"/Robobo{self._identifier}/Pan_Motor/Pan_Respondable/Tilt_Motor")
         # fmt: on
 
         try:

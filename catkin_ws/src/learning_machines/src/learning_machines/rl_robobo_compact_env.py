@@ -31,7 +31,7 @@ class RoboboCompactEnvConfig:
     phone_tilt: int = 100
     phone_tilt_speed: int = 100
     phone_tilt_tolerance: int = 5
-    phone_tilt_timeout: float = 10.0
+    phone_tilt_timeout: float = 20.0
     initialize_phone_tilt: bool = True
     max_episode_steps: int = 150
     collision_ir_threshold: float = 0.85
@@ -788,6 +788,18 @@ class RoboboCompactEnv(gym.Env):
         robot_handle = getattr(self.rob, "_robobo", None)
         if robot_handle is None:
             return
+
+        saved_joints: dict[int, float] = {}
+        for joint_attr in ("_pan_motor_joint", "_tilt_motor_joint"):
+            joint_handle = getattr(self.rob, joint_attr, None)
+            if joint_handle is not None:
+                try:
+                    saved_joints[int(joint_handle)] = float(
+                        sim.getJointPosition(joint_handle)
+                    )
+                except Exception:
+                    pass
+
         sim.setObjectPosition(
             robot_handle,
             [robot_xy[0], robot_xy[1], self._authored_robot_pose[2]],
@@ -797,6 +809,12 @@ class RoboboCompactEnv(gym.Env):
             robot_handle,
             [math.atan2(direction[1], direction[0]), orientation[1], orientation[2]],
         )
+
+        for joint_handle, position in saved_joints.items():
+            try:
+                sim.setJointPosition(joint_handle, position)
+            except Exception:
+                pass
 
     def _randomize_push_layout(self) -> None:
         self._push_layout_randomized = False
