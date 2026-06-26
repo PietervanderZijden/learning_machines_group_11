@@ -31,6 +31,12 @@ class _LayoutSim:
     def setObjectOrientation(self, handle, orientation):
         self.orientations[handle] = list(orientation)
 
+    def setObjectQuaternion(self, handle, quat):
+        pass
+
+    def getObjectQuaternion(self, handle, _world):
+        return [1.0, 0.0, 0.0, 0.0]
+
     def resetDynamicObject(self, _handle):
         pass
 
@@ -59,6 +65,7 @@ def _layout_env(stage):
     env._authored_green_goal_pose = (-2.90, 0.80, 0.005)
     env._authored_robot_pose = (-3.125, 0.80, 0.05)
     env._authored_robot_orientation = (0.0, 0.0, 0.0)
+    env._authored_robot_quaternion = (1.0, 0.0, 0.0, 0.0)
     return env
 
 

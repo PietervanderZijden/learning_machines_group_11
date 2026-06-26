@@ -191,6 +191,7 @@ class RoboboCompactEnv(gym.Env):
         self._authored_green_goal_pose: tuple[float, float, float] | None = None
         self._authored_robot_pose: tuple[float, float, float] | None = None
         self._authored_robot_orientation: tuple[float, float, float] | None = None
+        self._authored_robot_quaternion: tuple[float, float, float, float] | None = None
         self._robot_respondable_handles: tuple[int, ...] = ()
         self._previous_block_goal_distance: float | None = None
         self._previous_push_potential: float | None = None
@@ -435,6 +436,7 @@ class RoboboCompactEnv(gym.Env):
             self._ensure_push_handles()
         self._cache_initial_position()
         if self.config.task == "push":
+            self._restore_robot_pose()
             self._randomize_push_layout()
         elif self.config.randomize_food_positions:
             self._randomize_food_positions()
@@ -443,6 +445,19 @@ class RoboboCompactEnv(gym.Env):
 
         self.rob.play_simulation()
         self._fix_lifted_food()
+
+    def _restore_robot_pose(self) -> None:
+        """Reset the robot to its authored pose while the simulation is stopped."""
+        if self._authored_robot_pose is None:
+            return
+        sim = self.rob._sim
+        robot_handle = getattr(self.rob, "_robobo", None)
+        if robot_handle is None:
+            return
+        x, y, z = self._authored_robot_pose
+        sim.setObjectPosition(robot_handle, [x, y, z])
+        quat = self._authored_robot_quaternion or (1.0, 0.0, 0.0, 0.0)
+        sim.setObjectQuaternion(robot_handle, list(quat))
 
     def _read_phone_tilt(self) -> int | None:
         try:
@@ -589,6 +604,16 @@ class RoboboCompactEnv(gym.Env):
                     )
                 except Exception:
                     self._authored_robot_orientation = (0.0, 0.0, 0.0)
+                try:
+                    quat = self.rob._sim.getObjectQuaternion(
+                        self.rob._robobo, self.rob._sim.handle_world
+                    )
+                    self._authored_robot_quaternion = (
+                        float(quat[0]), float(quat[1]),
+                        float(quat[2]), float(quat[3]),
+                    )
+                except Exception:
+                    self._authored_robot_quaternion = (1.0, 0.0, 0.0, 0.0)
         except Exception:
             self._initial_pos_x = self._arena_cx
             self._initial_pos_y = self._arena_cy
@@ -793,11 +818,6 @@ class RoboboCompactEnv(gym.Env):
         robot_handle = getattr(self.rob, "_robobo", None)
         if robot_handle is None:
             return
-
-        sim.setObjectPosition(
-            robot_handle,
-            [robot_xy[0], robot_xy[1], self._authored_robot_pose[2]],
-        )
         orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
         authored_block = self._authored_red_block_pose
         if authored_block is not None and self._authored_robot_pose is not None:
@@ -805,14 +825,23 @@ class RoboboCompactEnv(gym.Env):
                 authored_block[0] - self._authored_robot_pose[0],
                 authored_block[1] - self._authored_robot_pose[1],
             )
-            forward_offset = orientation[2] - math.atan2(to_block[1], to_block[0])
+            forward_offset = orientation[0] - math.atan2(to_block[1], to_block[0])
         else:
             forward_offset = 0.0
         heading = math.atan2(direction[1], direction[0]) + forward_offset
-        sim.setObjectOrientation(
+        sim.setObjectPosition(
             robot_handle,
-            [orientation[0], orientation[1], heading],
+            [robot_xy[0], robot_xy[1], self._authored_robot_pose[2]],
         )
+        qa = self._authored_robot_quaternion or (1.0, 0.0, 0.0, 0.0)
+        qh = (math.cos(heading / 2), math.sin(heading / 2), 0.0, 0.0)
+        q_new = (
+            qh[0] * qa[0] - qh[1] * qa[1] - qh[2] * qa[2] - qh[3] * qa[3],
+            qh[0] * qa[1] + qh[1] * qa[0] + qh[2] * qa[3] - qh[3] * qa[2],
+            qh[0] * qa[2] - qh[1] * qa[3] + qh[2] * qa[0] + qh[3] * qa[1],
+            qh[0] * qa[3] + qh[1] * qa[2] - qh[2] * qa[1] + qh[3] * qa[0],
+        )
+        sim.setObjectQuaternion(robot_handle, list(q_new))
 
     def _randomize_push_layout(self) -> None:
         self._push_layout_randomized = False
