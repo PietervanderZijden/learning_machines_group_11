@@ -31,14 +31,37 @@ class _LayoutSim:
     def setObjectOrientation(self, handle, orientation):
         self.orientations[handle] = list(orientation)
 
-    def setObjectQuaternion(self, handle, quat):
-        pass
-
-    def getObjectQuaternion(self, handle, _world):
-        return [1.0, 0.0, 0.0, 0.0]
-
     def resetDynamicObject(self, _handle):
         pass
+
+    def buildMatrix(self, pos, euler):
+        a, b, g = euler
+        ca, sa = math.cos(a), math.sin(a)
+        cb, sb = math.cos(b), math.sin(b)
+        cg, sg = math.cos(g), math.sin(g)
+        return [
+            cb * cg, -cb * sg, sb, 0.0,
+            sa * sb * cg + ca * sg, -sa * sb * sg + ca * cg, -sa * cb, 0.0,
+            -ca * sb * cg + sa * sg, ca * sb * sg + sa * cg, ca * cb, 0.0,
+        ]
+
+    def multiplyMatrices(self, m1, m2):
+        result = [0.0] * 12
+        for row in range(3):
+            for col in range(4):
+                result[row * 4 + col] = (
+                    m1[row * 4 + 0] * m2[0 * 4 + col]
+                    + m1[row * 4 + 1] * m2[1 * 4 + col]
+                    + m1[row * 4 + 2] * m2[2 * 4 + col]
+                )
+        return result
+
+    def getEulerAnglesFromMatrix(self, m):
+        cb = math.sqrt(m[0] * m[0] + m[1] * m[1])
+        a = math.atan2(-m[6], m[10])
+        b = math.atan2(m[2], cb)
+        g = math.atan2(-m[1], m[0])
+        return [a, b, g]
 
 
 def _layout_env(stage):
@@ -65,7 +88,8 @@ def _layout_env(stage):
     env._authored_green_goal_pose = (-2.90, 0.80, 0.005)
     env._authored_robot_pose = (-3.125, 0.80, 0.05)
     env._authored_robot_orientation = (0.0, 0.0, 0.0)
-    env._authored_robot_quaternion = (1.0, 0.0, 0.0, 0.0)
+    env._authored_robot_matrix = None
+    env._authored_robot_heading = None
     return env
 
 

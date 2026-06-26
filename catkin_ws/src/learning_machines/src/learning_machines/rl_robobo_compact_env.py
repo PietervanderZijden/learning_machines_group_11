@@ -191,7 +191,8 @@ class RoboboCompactEnv(gym.Env):
         self._authored_green_goal_pose: tuple[float, float, float] | None = None
         self._authored_robot_pose: tuple[float, float, float] | None = None
         self._authored_robot_orientation: tuple[float, float, float] | None = None
-        self._authored_robot_quaternion: tuple[float, float, float, float] | None = None
+        self._authored_robot_matrix: list[float] | None = None
+        self._authored_robot_heading: float | None = None
         self._robot_respondable_handles: tuple[int, ...] = ()
         self._previous_block_goal_distance: float | None = None
         self._previous_push_potential: float | None = None
@@ -456,8 +457,12 @@ class RoboboCompactEnv(gym.Env):
             return
         x, y, z = self._authored_robot_pose
         sim.setObjectPosition(robot_handle, [x, y, z])
-        quat = self._authored_robot_quaternion or (1.0, 0.0, 0.0, 0.0)
-        sim.setObjectQuaternion(robot_handle, list(quat))
+        orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
+        sim.setObjectOrientation(robot_handle, list(orientation))
+        try:
+            sim.resetDynamicObject(robot_handle)
+        except Exception:
+            pass
 
     def _read_phone_tilt(self) -> int | None:
         try:
@@ -602,18 +607,22 @@ class RoboboCompactEnv(gym.Env):
                         float(orientation.pitch),
                         float(orientation.roll),
                     )
+                    if self._is_simulation:
+                        sim = self.rob._sim
+                        self._authored_robot_matrix = sim.buildMatrix(
+                            [0.0, 0.0, 0.0],
+                            [
+                                self._authored_robot_orientation[0],
+                                self._authored_robot_orientation[1],
+                                self._authored_robot_orientation[2],
+                            ],
+                        )
+                        self._authored_robot_heading = math.atan2(
+                            self._authored_robot_matrix[6],
+                            self._authored_robot_matrix[2],
+                        )
                 except Exception:
                     self._authored_robot_orientation = (0.0, 0.0, 0.0)
-                try:
-                    quat = self.rob._sim.getObjectQuaternion(
-                        self.rob._robobo, self.rob._sim.handle_world
-                    )
-                    self._authored_robot_quaternion = (
-                        float(quat[0]), float(quat[1]),
-                        float(quat[2]), float(quat[3]),
-                    )
-                except Exception:
-                    self._authored_robot_quaternion = (1.0, 0.0, 0.0, 0.0)
         except Exception:
             self._initial_pos_x = self._arena_cx
             self._initial_pos_y = self._arena_cy
@@ -818,30 +827,32 @@ class RoboboCompactEnv(gym.Env):
         robot_handle = getattr(self.rob, "_robobo", None)
         if robot_handle is None:
             return
-        orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
-        authored_block = self._authored_red_block_pose
-        if authored_block is not None and self._authored_robot_pose is not None:
-            to_block = (
-                authored_block[0] - self._authored_robot_pose[0],
-                authored_block[1] - self._authored_robot_pose[1],
-            )
-            forward_offset = orientation[0] - math.atan2(to_block[1], to_block[0])
-        else:
-            forward_offset = 0.0
-        heading = math.atan2(direction[1], direction[0]) + forward_offset
         sim.setObjectPosition(
             robot_handle,
             [robot_xy[0], robot_xy[1], self._authored_robot_pose[2]],
         )
-        qa = self._authored_robot_quaternion or (1.0, 0.0, 0.0, 0.0)
-        qh = (math.cos(heading / 2), math.sin(heading / 2), 0.0, 0.0)
-        q_new = (
-            qh[0] * qa[0] - qh[1] * qa[1] - qh[2] * qa[2] - qh[3] * qa[3],
-            qh[0] * qa[1] + qh[1] * qa[0] + qh[2] * qa[3] - qh[3] * qa[2],
-            qh[0] * qa[2] - qh[1] * qa[3] + qh[2] * qa[0] + qh[3] * qa[1],
-            qh[0] * qa[3] + qh[1] * qa[2] - qh[2] * qa[1] + qh[3] * qa[0],
-        )
-        sim.setObjectQuaternion(robot_handle, list(q_new))
+        orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
+        authored_block = self._authored_red_block_pose
+        authored_robot = self._authored_robot_pose
+        authored_heading = self._authored_robot_heading
+        authored_matrix = self._authored_robot_matrix
+        if authored_heading is None or authored_matrix is None:
+            authored_matrix = sim.buildMatrix([0.0, 0.0, 0.0], list(orientation))
+            authored_heading = math.atan2(authored_matrix[6], authored_matrix[2])
+        if authored_block is not None and authored_robot is not None:
+            to_block = (
+                authored_block[0] - authored_robot[0],
+                authored_block[1] - authored_robot[1],
+            )
+            forward_offset = authored_heading - math.atan2(to_block[1], to_block[0])
+        else:
+            forward_offset = 0.0
+        desired_heading = math.atan2(direction[1], direction[0]) + forward_offset
+        yaw_delta = desired_heading - authored_heading
+        yaw_matrix = sim.buildMatrix([0.0, 0.0, 0.0], [0.0, 0.0, yaw_delta])
+        new_matrix = sim.multiplyMatrices(yaw_matrix, authored_matrix)
+        new_euler = sim.getEulerAnglesFromMatrix(new_matrix)
+        sim.setObjectOrientation(robot_handle, list(new_euler))
 
     def _randomize_push_layout(self) -> None:
         self._push_layout_randomized = False
