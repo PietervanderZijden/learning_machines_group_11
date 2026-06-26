@@ -30,7 +30,7 @@ class RoboboCompactEnvConfig:
     step_millis: int = 400
     phone_tilt: int = 100
     phone_tilt_speed: int = 100
-    phone_tilt_tolerance: int = 5
+    phone_tilt_tolerance: int = 20
     phone_tilt_timeout: float = 20.0
     initialize_phone_tilt: bool = True
     max_episode_steps: int = 150
