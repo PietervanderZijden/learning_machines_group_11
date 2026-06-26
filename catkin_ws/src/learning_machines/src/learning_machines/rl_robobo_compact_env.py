@@ -200,6 +200,8 @@ class RoboboCompactEnv(gym.Env):
         self._authored_green_goal_pose: tuple[float, float, float] | None = None
         self._authored_robot_pose: tuple[float, float, float] | None = None
         self._authored_robot_orientation: tuple[float, float, float] | None = None
+        self._authored_robot_matrix: list[float] | None = None
+        self._authored_robot_heading: float | None = None
         self._robot_respondable_handles: tuple[int, ...] = ()
         self._previous_block_goal_distance: float | None = None
         self._previous_push_potential: float | None = None
@@ -630,6 +632,20 @@ class RoboboCompactEnv(gym.Env):
                         float(orientation.pitch),
                         float(orientation.roll),
                     )
+                    if self._is_simulation:
+                        sim = self.rob._sim
+                        self._authored_robot_matrix = sim.buildMatrix(
+                            [0.0, 0.0, 0.0],
+                            [
+                                self._authored_robot_orientation[0],
+                                self._authored_robot_orientation[1],
+                                self._authored_robot_orientation[2],
+                            ],
+                        )
+                        self._authored_robot_heading = math.atan2(
+                            self._authored_robot_matrix[6],
+                            self._authored_robot_matrix[2],
+                        )
                 except Exception:
                     self._authored_robot_orientation = (0.0, 0.0, 0.0)
         except Exception:
@@ -842,19 +858,49 @@ class RoboboCompactEnv(gym.Env):
         )
         orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
         authored_block = self._authored_red_block_pose
-        if authored_block is not None and self._authored_robot_pose is not None:
+        authored_robot = self._authored_robot_pose
+        authored_heading = self._authored_robot_heading
+        authored_matrix = self._authored_robot_matrix
+        if authored_heading is None or authored_matrix is None:
+            authored_matrix = sim.buildMatrix([0.0, 0.0, 0.0], list(orientation))
+            authored_heading = math.atan2(authored_matrix[6], authored_matrix[2])
+        if authored_block is not None and authored_robot is not None:
             to_block = (
-                authored_block[0] - self._authored_robot_pose[0],
-                authored_block[1] - self._authored_robot_pose[1],
+                authored_block[0] - authored_robot[0],
+                authored_block[1] - authored_robot[1],
             )
-            forward_offset = orientation[2] - math.atan2(to_block[1], to_block[0])
+            forward_offset = authored_heading - math.atan2(to_block[1], to_block[0])
         else:
             forward_offset = 0.0
-        heading = math.atan2(direction[1], direction[0]) + forward_offset
-        sim.setObjectOrientation(
-            robot_handle,
-            [orientation[0], orientation[1], heading],
-        )
+        desired_heading = math.atan2(direction[1], direction[0]) + forward_offset
+        yaw_delta = desired_heading - authored_heading
+        yaw_matrix = sim.buildMatrix([0.0, 0.0, 0.0], [0.0, 0.0, yaw_delta])
+        new_matrix = sim.multiplyMatrices(yaw_matrix, authored_matrix)
+        new_euler = sim.getEulerAnglesFromMatrix(new_matrix)
+        sim.setObjectOrientation(robot_handle, list(new_euler))
+
+    def _restore_robot_pose(self) -> None:
+        """Restore the robot to its authored scene position and orientation.
+
+        CoppeliaSim does not reset object poses when the simulation is
+        stopped and restarted, so a robot that tumbled or was repositioned
+        in a previous episode stays where it was.  This must be called
+        before any stage-specific layout randomisation so every episode
+        starts from a known-good upright pose.
+        """
+        if not self._is_simulation:
+            return
+        robot_handle = getattr(self.rob, "_robobo", None)
+        if robot_handle is None or self._authored_robot_pose is None:
+            return
+        sim = self.rob._sim
+        sim.setObjectPosition(robot_handle, list(self._authored_robot_pose))
+        orientation = self._authored_robot_orientation or (0.0, 0.0, 0.0)
+        sim.setObjectOrientation(robot_handle, list(orientation))
+        try:
+            sim.resetDynamicObject(robot_handle)
+        except Exception:
+            pass
 
     def _randomize_push_layout(self) -> None:
         self._push_layout_randomized = False
@@ -865,6 +911,7 @@ class RoboboCompactEnv(gym.Env):
             raise ValueError("push curriculum stage must be 0, 1, or 2")
         if not self.config.randomize_push_layout:
             stage = 0
+        self._restore_robot_pose()
         if (
             getattr(self, "_authored_red_block_pose", None) is None
             or getattr(self, "_authored_green_goal_pose", None) is None
