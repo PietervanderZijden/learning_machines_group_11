@@ -32,7 +32,7 @@ class RoboboCompactEnvConfig:
     phone_tilt: int = 100
     phone_tilt_speed: int = 100
     phone_tilt_tolerance: int = 5
-    phone_tilt_timeout: float = 6.0
+    phone_tilt_timeout: float = 10.0
     initialize_phone_tilt: bool = True
     max_episode_steps: int = 150
     collision_ir_threshold: float = 0.85
@@ -78,7 +78,7 @@ class RoboboCompactEnvConfig:
     push_contact_bonus: float = 1.0
     push_approach_completion_bonus: float = 5.0
     push_goal_completion_bonus: float = 15.0
-    push_standoff_distance: float = 0.22
+    push_standoff_distance: float = 0.35
     push_time_penalty_per_second: float = 0.05
     push_action_change_penalty: float = 0.0
     push_red_hsv_low_1: tuple[int, int, int] = (0, 80, 60)
@@ -840,10 +840,6 @@ class RoboboCompactEnv(gym.Env):
             robot_handle,
             [math.atan2(direction[1], direction[0]), orientation[1], orientation[2]],
         )
-        try:
-            sim.resetDynamicObject(robot_handle)
-        except Exception:
-            pass
 
     def _randomize_push_layout(self) -> None:
         self._push_layout_randomized = False
