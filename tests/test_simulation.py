@@ -1,4 +1,4 @@
-"""Tests for SimulationRobobo improvements."""
+'Tests for SimulationRobobo improvements.'
 from __future__ import annotations
 
 import math
@@ -91,7 +91,7 @@ class TestSleep:
         sim_robobo.stop_simulation()
         sim_robobo.play_simulation()
         sim_robobo.stop_simulation()
-        # sleep should return gracefully instead of hanging
+
         sim_robobo.sleep(0.1)
 
 
@@ -105,12 +105,12 @@ class TestDisplayDisabled:
 
 class TestPatchFoodContactCallback:
     def test_food_script_patched(self, sim_robobo):
-        """After patching, the food contact script should exist."""
+        'After patching, the food contact script should exist.'
         try:
             script_handle = sim_robobo._sim.getScript(
                 sim_robobo._sim.scripttype_child, sim_robobo._robobo
             )
         except Exception:
             pytest.skip("Could not retrieve child script from scene")
-        # If we got here without exception, the patch didn't crash
+
         assert True

@@ -1,4 +1,4 @@
-"""Shared fixtures for robobo_interface tests."""
+'Shared fixtures for robobo_interface tests.'
 from __future__ import annotations
 
 import os
@@ -17,11 +17,7 @@ def sim_ip() -> str:
 
 @pytest.fixture(scope="session")
 def sim_robobo(sim_port: int, sim_ip: str):
-    """Provide a connected SimulationRobobo that is stopped between tests.
-
-    The fixture is session-scoped so the ZMQ connection is established only
-    once.  The simulation is stopped after each test that may have started it.
-    """
+    'Provide a connected SimulationRobobo that is stopped between tests.'
     from robobo_interface import SimulationRobobo
 
     rob = SimulationRobobo(api_port=sim_port, ip_adress=sim_ip)

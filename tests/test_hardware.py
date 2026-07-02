@@ -1,4 +1,4 @@
-"""Tests for HardwareRobobo improvements."""
+'Tests for HardwareRobobo improvements.'
 from __future__ import annotations
 
 import pytest
@@ -35,5 +35,5 @@ class TestLazyHardwareImport:
         import importlib
         import robobo_interface
         importlib.reload(robobo_interface)
-        # HardwareRobobo should be accessible via getattr
+
         assert hasattr(robobo_interface, "HardwareRobobo")
