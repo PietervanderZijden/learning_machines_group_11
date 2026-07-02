@@ -1,4 +1,4 @@
-'Hybrid persistent/per-step domain randomization shared by all algorithms.'
+"""Hybrid persistent/per-step domain randomization shared by all algorithms."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -27,6 +27,7 @@ class RandomizationRanges:
     camera_exposure: tuple[float, float] = (-0.12, 0.12)
     camera_contrast: tuple[float, float] = (0.85, 1.15)
     camera_color_balance: tuple[float, float] = (0.9, 1.1)
+    camera_color_balance_enabled: bool = False
     camera_crop_fraction: tuple[float, float] = (0.0, 0.04)
     camera_tilt_offset: tuple[int, int] = (-4, 4)
     camera_shift_pixels: tuple[float, float] = (-3.0, 3.0)
@@ -43,7 +44,7 @@ class RandomizationRanges:
         simulation: CalibrationProfile,
         hardware: CalibrationProfile,
     ) -> "RandomizationRanges":
-        'Derive conservative IR ranges from measured sim/hardware endpoints.'
+        """Derive conservative IR ranges from measured sim/hardware endpoints."""
         sim_span = np.array([
             abs(sensor.near_obstacle - sensor.free_space)
             for sensor in simulation.sensors
@@ -68,7 +69,7 @@ class RandomizationRanges:
 
 
 class DomainRandomizationWrapper(gym.Wrapper):
-    'Samples physical/visual parameters once per episode and noise per step.'
+    """Samples physical/visual parameters once per episode and noise per step."""
 
     def __init__(
         self,
@@ -112,7 +113,11 @@ class DomainRandomizationWrapper(gym.Wrapper):
             "smoothing_previous_weight": float(self._uniform(r.smoothing_previous_weight)),
             "camera_exposure": float(self._uniform(r.camera_exposure)),
             "camera_contrast": float(self._uniform(r.camera_contrast)),
-            "camera_color_balance": self._uniform(r.camera_color_balance, 3).astype(np.float32),
+            "camera_color_balance": (
+                self._uniform(r.camera_color_balance, 3).astype(np.float32)
+                if r.camera_color_balance_enabled
+                else np.ones(3, dtype=np.float32)
+            ),
             "camera_crop_fraction": float(self._uniform(r.camera_crop_fraction)),
             "camera_tilt_offset": int(self.rng.integers(
                 r.camera_tilt_offset[0], r.camera_tilt_offset[1] + 1
@@ -188,11 +193,13 @@ class DomainRandomizationWrapper(gym.Wrapper):
             obs["ir"] = self._augment_ir(obs["ir"])
         if "image" in obs:
             obs["image"] = self._augment_image(obs["image"])
-        if "blob" in obs and obs["blob"][3] > 0.5:
-            blob = np.asarray(obs["blob"], dtype=np.float32).copy()
+        for key in ("blob", "red_block", "green_goal"):
+            if key not in obs or obs[key][3] <= 0.5:
+                continue
+            blob = np.asarray(obs[key], dtype=np.float32).copy()
             blob[:2] += self.rng.normal(0.0, 0.015, 2)
             blob[2] = max(0.0, blob[2] * (1.0 + self.rng.normal(0.0, 0.03)))
-            obs["blob"] = blob
+            obs[key] = blob
         return obs
 
     def reset(self, **kwargs):

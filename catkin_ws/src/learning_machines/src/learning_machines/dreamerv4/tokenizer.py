@@ -41,7 +41,7 @@ class ImageEncoder(nn.Module):
         )
 
     def forward(self, image: torch.Tensor, return_features: bool = False):
-        'Args:.'
+        """Encode images and optionally return intermediate features."""
         if image.dtype == torch.uint8:
             image = image.float() / 255.0
 
@@ -90,7 +90,7 @@ class ImageDecoder(nn.Module):
         )
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
-        'Args:.'
+        """Decode latent tensors into images."""
         x = self.fc(latent)
         x = x.view(-1, 256, 4, 4)
         return self.deconv(x)

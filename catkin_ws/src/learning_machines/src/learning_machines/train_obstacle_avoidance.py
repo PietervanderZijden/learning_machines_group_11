@@ -40,6 +40,7 @@ def _make_fresh_model(env: Monitor, policy_kwargs: dict) -> SAC:
     return SAC(
         policy="MultiInputPolicy",
         env=env,
+        #policy_kwargs=policy_kwargs,
         policy_kwargs=policy_kwargs,
         learning_rate=3e-4,
         buffer_size=100_000,

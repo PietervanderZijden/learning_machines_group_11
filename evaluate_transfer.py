@@ -190,8 +190,9 @@ def main():
     parser.add_argument(
         "--algorithm",
         required=True,
-        choices=["sac", "dreamerv3", "dreamerv4", "dreamerv4-full"],
+        choices=["sac", "dreamerv3", "dreamerv4-full"],
     )
+    parser.add_argument("--task", choices=["food", "push"], default="food")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--manifest")
     parser.add_argument("--port", type=int, default=23000)
@@ -241,7 +242,6 @@ def main():
     from deploy_hardware import (
         DreamerV3Policy,
         DreamerV4FullPolicy,
-        DreamerV4Policy,
         SACPolicy,
     )
     from learning_machines.domain_randomization import (
@@ -263,22 +263,31 @@ def main():
         args.image_size,
         manifest.phone_tilt,
     )
+    manifest_task = manifest.algorithm_config.get("task", "food")
+    expected_task = "push" if args.task == "push" else "food"
+    if manifest_task not in {expected_task, "food_collection"}:
+        raise ValueError(
+            f"checkpoint task {manifest_task!r} does not match {args.task!r}"
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.algorithm == "sac":
-        policy = SACPolicy(args.checkpoint)
+        policy = SACPolicy(
+            args.checkpoint,
+            int(manifest.algorithm_config.get("observation_dim", 14)),
+        )
     elif args.algorithm == "dreamerv3":
         policy = DreamerV3Policy(args.checkpoint)
-    elif args.algorithm == "dreamerv4":
-        policy = DreamerV4Policy(args.checkpoint, device)
     else:
         policy = DreamerV4FullPolicy(args.checkpoint, device)
 
     env = RoboboCompactEnv(config=RoboboCompactEnvConfig(
+        task="push" if args.task == "push" else "food_collection",
         return_image=True,
         image_obs_size=(args.image_size, args.image_size),
         calibration_profile=profile,
         randomize_food_positions=args.domain != "fixed",
+        randomize_push_layout=args.domain != "fixed",
         phone_tilt=manifest.phone_tilt,
         max_episode_seconds=args.max_seconds,
     ))
@@ -387,7 +396,10 @@ def main():
                         )
                         saved_diagnostic_images += 1
                 elif args.algorithm == "sac":
-                    blob = np.asarray(next_obs["blob"], dtype=np.float32)
+                    blob_key = (
+                        "red_block" if args.task == "push" else "blob"
+                    )
+                    blob = np.asarray(next_obs[blob_key], dtype=np.float32)
                     raw_ir = np.asarray(info.get("raw_ir", [np.nan] * 8), dtype=np.float32)
                     normalized_ir = np.asarray(next_obs["ir"], dtype=np.float32)
                     diagnostic_row = {
@@ -461,12 +473,18 @@ def main():
                 global_transition += 1
                 if done:
                     break
+            completed = (
+                bool(final_info.get("push_success", False))
+                if args.task == "push"
+                else final_info.get("completion_time") is not None
+            )
             row = {
+                "task": args.task,
                 "algorithm": args.algorithm,
                 "domain": args.domain,
                 "episode": episode,
                 "return": total_reward,
-                "completion": int(final_info.get("completion_time") is not None),
+                "completion": int(completed),
                 "completion_seconds": final_info.get("completion_time") or np.nan,
                 "elapsed_seconds": final_info.get("elapsed_seconds", 0.0),
                 "food_collected": final_info.get("food_collected", 0),
@@ -498,6 +516,7 @@ def main():
         writer.writerows(rows)
 
     summary = {
+        "task": args.task,
         "algorithm": args.algorithm,
         "domain": args.domain,
         "episodes": len(rows),

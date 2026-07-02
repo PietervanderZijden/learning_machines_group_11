@@ -35,6 +35,7 @@ def test(
     )
 
     config = RoboboObstacleEnvConfig(
+        #image_size=(100, 100),
         image_size=(128, 128),
         max_wheel_speed=70,
         step_millis=100,

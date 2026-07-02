@@ -20,6 +20,21 @@ TRAINERS = {
     ("push", "dreamerv3"): "train_dreamerv3_push.py",
 }
 
+EVALUATORS = {
+    ("food", "sac"),
+    ("food", "dreamerv3"),
+    ("food", "dreamerv4-full"),
+    ("push", "sac"),
+    ("push", "dreamerv3"),
+}
+
+DEPLOYERS = {
+    ("food", "sac"),
+    ("food", "dreamerv3"),
+    ("food", "dreamerv4-full"),
+    ("push", "dreamerv3"),
+}
+
 
 def _run(script: str, arguments: list[str]) -> int:
     """Run a repository command with forwarded arguments."""
@@ -29,9 +44,16 @@ def _run(script: str, arguments: list[str]) -> int:
 def _run_module(module: str, function: str) -> int:
     """Run a legacy learning function in the configured Python environment."""
     source = ROOT / "catkin_ws/src/learning_machines/src"
+    interface = ROOT / "catkin_ws/src/robobo_interface/src"
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join(
-        value for value in (str(source), environment.get("PYTHONPATH")) if value
+        value
+        for value in (
+            str(source),
+            str(interface),
+            environment.get("PYTHONPATH"),
+        )
+        if value
     )
     expression = f"from {module} import {function}; {function}()"
     return subprocess.call([sys.executable, "-c", expression], env=environment)
@@ -64,8 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="robobo.py")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    record = commands.add_parser("record")
+    record.add_argument("task", choices=["food"])
+    record.add_argument("arguments", nargs=argparse.REMAINDER)
+
     train = commands.add_parser("train")
-    train.add_argument("task", choices=["food", "push", "approach", "evade"])
+    train.add_argument(
+        "task", choices=["food", "push", "approach-evade"]
+    )
     train.add_argument(
         "algorithm",
         choices=["reactive", "ddpg", "sac", "dreamerv3", "dreamerv4-full"],
@@ -73,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("arguments", nargs=argparse.REMAINDER)
 
     evaluate = commands.add_parser("evaluate")
+    evaluate.add_argument("task", choices=["food", "push"])
+    evaluate.add_argument(
+        "algorithm", choices=["sac", "dreamerv3", "dreamerv4-full"]
+    )
     evaluate.add_argument("arguments", nargs=argparse.REMAINDER)
 
     validate = commands.add_parser("validate")
@@ -80,8 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("arguments", nargs=argparse.REMAINDER)
 
     run = commands.add_parser("run")
-    run.add_argument("task", choices=["approach", "evade"])
-    run.add_argument("algorithm", choices=["reactive", "ddpg", "sac"])
+    run.add_argument(
+        "task", choices=["food", "push", "approach-evade"]
+    )
+    run.add_argument(
+        "algorithm",
+        choices=["reactive", "ddpg", "sac", "dreamerv3", "dreamerv4-full"],
+    )
+    run.add_argument("arguments", nargs=argparse.REMAINDER)
 
     deploy = commands.add_parser("deploy")
     deploy.add_argument("task", choices=["food", "push"])
@@ -95,19 +133,34 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     """Dispatch a unified Robobo command."""
     args = build_parser().parse_args()
+    if args.command == "record":
+        return _run("record_food.py", args.arguments)
     if args.command == "train":
         script = TRAINERS.get((args.task, args.algorithm))
         if script:
             return _run(script, args.arguments)
-        if args.algorithm == "ddpg":
+        if args.task == "approach-evade" and args.algorithm == "ddpg":
             return _run_module("learning_machines.train_ddpg", "train_simple")
-        if args.algorithm == "sac":
+        if args.task == "approach-evade" and args.algorithm == "sac":
             return _run_module(
                 "learning_machines.train_obstacle_avoidance", "main"
             )
         raise SystemExit(f"{args.algorithm} training is unavailable for {args.task}")
     if args.command == "evaluate":
-        return _run("evaluate_transfer.py", args.arguments)
+        if (args.task, args.algorithm) not in EVALUATORS:
+            raise SystemExit(
+                f"{args.algorithm} evaluation is unavailable for {args.task}"
+            )
+        return _run(
+            "evaluate_transfer.py",
+            [
+                "--task",
+                args.task,
+                "--algorithm",
+                args.algorithm,
+                *args.arguments,
+            ],
+        )
     if args.command == "validate":
         script = (
             "validate_simulation.py"
@@ -116,8 +169,29 @@ def main() -> int:
         )
         return _run(script, args.arguments)
     if args.command == "run":
+        if args.task != "approach-evade":
+            if (args.task, args.algorithm) not in EVALUATORS:
+                raise SystemExit(
+                    f"{args.algorithm} running is unavailable for {args.task}"
+                )
+            return _run(
+                "evaluate_transfer.py",
+                [
+                    "--task",
+                    args.task,
+                    "--algorithm",
+                    args.algorithm,
+                    "--episodes",
+                    "1",
+                    *args.arguments,
+                ],
+            )
         if args.algorithm == "reactive":
             return _run_reactive()
+        if args.algorithm not in {"ddpg", "sac"}:
+            raise SystemExit(
+                f"{args.algorithm} running is unavailable for {args.task}"
+            )
         function = "test_simple" if args.algorithm == "ddpg" else "test"
         module = (
             "learning_machines.train_ddpg"
@@ -125,12 +199,19 @@ def main() -> int:
             else "learning_machines.test_obstacle_avoidance"
         )
         return _run_module(module, function)
-    if args.task == "push":
-        if args.algorithm != "dreamerv3":
-            raise SystemExit("push hardware deployment supports dreamerv3")
-        return _run("deploy_dreamerv3_push_hardware.py", args.arguments)
+    if (args.task, args.algorithm) not in DEPLOYERS:
+        raise SystemExit(
+            f"{args.algorithm} deployment is unavailable for {args.task}"
+        )
     return _run(
-        "deploy_hardware.py", ["--algorithm", args.algorithm, *args.arguments]
+        "deploy_hardware.py",
+        [
+            "--task",
+            args.task,
+            "--algorithm",
+            args.algorithm,
+            *args.arguments,
+        ],
     )
 
 

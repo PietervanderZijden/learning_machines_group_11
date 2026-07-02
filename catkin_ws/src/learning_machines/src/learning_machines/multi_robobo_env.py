@@ -251,6 +251,7 @@ class RoboboDomainRandomizationWrapper(gym.Wrapper):
             return obs
 
         randomized_obs = {
+            # CAMERA UITGEZET: "image": self._randomize_image(obs["image"]),
             "image": self._randomize_image(obs["image"]),
             "ir": self._randomize_ir(obs["ir"]),
         }

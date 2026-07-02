@@ -65,7 +65,7 @@ class RoboboObstacleEnvConfig:
 
 
 class RoboboObstacleAvoidanceEnv(gym.Env):
-    'Observation:.'
+    """Run image-and-IR obstacle-avoidance transitions."""
 
     metadata = {"render_modes": []}
 
@@ -80,9 +80,17 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         self.config = config or RoboboObstacleEnvConfig()
 
         height, width = self.config.image_size
+        # height, width = self.config.image_size
 
         self.observation_space = spaces.Dict(
             {
+                # CAMERA UITGEZET
+                # "image": spaces.Box(
+                #     low=0,
+                #     high=255,
+                #     shape=(1, height, width),
+                #     dtype=np.uint8,
+                # ),
                 "image": spaces.Box(
                     low=0,
                     high=255,
@@ -197,6 +205,8 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
 
     def _get_obs(self) -> dict[str, np.ndarray]:
         return {
+            # CAMERA UITGEZET
+            # "image": self._read_grayscale_image(),
             "image": self._read_grayscale_image(),
             "ir": self._read_normalized_irs(),
         }

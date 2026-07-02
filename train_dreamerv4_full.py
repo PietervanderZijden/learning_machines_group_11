@@ -17,6 +17,7 @@ import tqdm
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "catkin_ws/src/learning_machines/src"))
+sys.path.insert(0, str(ROOT / "catkin_ws/src/robobo_interface/src"))
 
 from learning_machines.dreamerv4_full import (  # noqa: E402
     DreamerV4FullAgent,
@@ -395,7 +396,7 @@ def average_validation(callback, batches: int):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--record-dir", default="recorded-states/dreamer-v3-states")
+    parser.add_argument("--record-dir", default="recorded_episodes")
     parser.add_argument("--checkpoint-dir", default="results/dreamer-v4-full-checkpoints")
     parser.add_argument("--calibration", default="config/calibration/simulation.json")
     parser.add_argument("--resume", action="store_true")

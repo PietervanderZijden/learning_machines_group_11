@@ -92,12 +92,13 @@ class Policy:
 
 
 class SACPolicy(Policy):
-    def __init__(self, checkpoint: str):
+    def __init__(self, checkpoint: str, observation_dim: int = 14):
+        """Load a SAC policy for a declared observation contract."""
         from gymnasium import spaces
         from stable_baselines3 import SAC
         install_numpy_checkpoint_compat()
         observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(observation_dim,), dtype=np.float32
         )
         action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(2,), dtype=np.float32
@@ -117,7 +118,7 @@ class SACPolicy(Policy):
         )
         self.previous_executed = np.zeros(2, dtype=np.float32)
         self.observation_dim = int(self.model.observation_space.shape[0])
-        if self.observation_dim not in (12, 14):
+        if self.observation_dim not in (12, 14, 18):
             raise ValueError(
                 f"unsupported SAC observation dimension: {self.observation_dim}"
             )
@@ -126,7 +127,17 @@ class SACPolicy(Policy):
         self.previous_executed.fill(0.0)
 
     def act(self, obs: dict) -> np.ndarray:
-        vector = np.concatenate([obs["blob"], obs["ir"]]).astype(np.float32)
+        if self.observation_dim == 18:
+            vector = np.concatenate(
+                [
+                    obs["red_block"],
+                    obs["green_goal"],
+                    obs["ir"],
+                    self.previous_executed,
+                ]
+            ).astype(np.float32)
+        else:
+            vector = np.concatenate([obs["blob"], obs["ir"]]).astype(np.float32)
         if self.observation_dim == 14:
             vector = np.concatenate([vector, self.previous_executed])
         action, _ = self.model.predict(vector, deterministic=True)
@@ -238,8 +249,9 @@ def main(rob=None, argv=None):
     parser.add_argument(
         "--algorithm",
         required=True,
-        choices=["sac", "dreamerv3", "dreamerv4", "dreamerv4-full"],
+        choices=["sac", "dreamerv3", "dreamerv4-full"],
     )
+    parser.add_argument("--task", choices=["food", "push"], default="food")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--manifest", default=None)
     parser.add_argument("--calibration", required=True)
@@ -271,6 +283,8 @@ def main(rob=None, argv=None):
     )
     parser.add_argument("--log-dir", default="hardware_logs")
     args = parser.parse_args(argv)
+    if args.task == "push" and args.algorithm != "dreamerv3":
+        parser.error("push hardware deployment supports dreamerv3")
     if not 1 <= args.max_wheel_speed <= MAX_DEPLOY_WHEEL_SPEED:
         parser.error(
             f"--max-wheel-speed must be between 1 and {MAX_DEPLOY_WHEEL_SPEED}"
@@ -339,23 +353,27 @@ def main(rob=None, argv=None):
                 f"Warning: checkpoint was trained at tilt {manifest.phone_tilt}; "
                 f"runtime startup tilt is {args.camera_tilt_on_start}."
             )
-    if (
-        args.algorithm == "sac"
-        and manifest.algorithm_config.get("observation_dim") != 14
+    manifest_task = manifest.algorithm_config.get("task", "food")
+    expected_task = "push" if args.task == "push" else "food"
+    if manifest_task not in {expected_task, "food_collection"}:
+        raise ValueError(
+            f"checkpoint task {manifest_task!r} does not match {args.task!r}"
+        )
+    expected_observation_dim = 18 if args.task == "push" else 14
+    if args.algorithm == "sac" and (
+        manifest.algorithm_config.get("observation_dim")
+        != expected_observation_dim
     ):
         raise ValueError(
-            "hardware deployment requires the 14-value SAC observation "
-            "contract with previous executed wheel commands; retrain the "
-            "legacy checkpoint"
+            f"hardware deployment requires the {expected_observation_dim}-value "
+            "SAC observation contract"
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.algorithm == "sac":
-        policy = SACPolicy(args.checkpoint)
+        policy = SACPolicy(args.checkpoint, expected_observation_dim)
     elif args.algorithm == "dreamerv3":
         policy = DreamerV3Policy(args.checkpoint)
-    elif args.algorithm == "dreamerv4":
-        policy = DreamerV4Policy(args.checkpoint, device)
     else:
         policy = DreamerV4FullPolicy(args.checkpoint, device)
 
@@ -363,6 +381,7 @@ def main(rob=None, argv=None):
         from robobo_interface import HardwareRobobo
         rob = HardwareRobobo(camera=True)
     env = RoboboCompactEnv(rob=rob, config=RoboboCompactEnvConfig(
+        task="push" if args.task == "push" else "food_collection",
         return_image=True,
         image_obs_size=(args.image_size, args.image_size),
         phone_tilt=(
@@ -375,6 +394,7 @@ def main(rob=None, argv=None):
         max_episode_seconds=run_seconds,
         max_wheel_speed=args.max_wheel_speed,
         randomize_food_positions=False,
+        randomize_push_layout=False,
     ))
     controls = OperatorControls()
     controls.start()

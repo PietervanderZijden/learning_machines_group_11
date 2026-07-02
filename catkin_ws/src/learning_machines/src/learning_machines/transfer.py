@@ -1,4 +1,4 @@
-'Shared sim-to-real contracts for Robobo training and deployment.'
+"""Shared sim-to-real contracts for Robobo training and deployment."""
 from __future__ import annotations
 
 import json
@@ -75,7 +75,6 @@ class CalibrationProfile:
 
 
 def default_calibration_profile(name: str = "simulation") -> CalibrationProfile:
-
     return CalibrationProfile(
         name=name,
         source="conservative-default",
@@ -84,7 +83,7 @@ def default_calibration_profile(name: str = "simulation") -> CalibrationProfile:
 
 
 class ObservationAdapter:
-    'Applies exactly the same IR and vector preprocessing in sim and hardware.'
+    """Applies exactly the same IR and vector preprocessing in sim and hardware."""
 
     def __init__(self, profile: CalibrationProfile):
         self.profile = profile
@@ -158,7 +157,7 @@ def transfer_reward(
 
 
 def blob_progress_potential(blob: np.ndarray | list[float]) -> float:
-    'Bounded navigation potential derived only from deployable camera features.'
+    """Return bounded navigation potential from camera features."""
     x, _y, area, found = np.asarray(blob, dtype=np.float32)
     if found < 0.5:
         return 0.0
@@ -244,7 +243,7 @@ class PreActionSafetyFilter:
 
 
 class ActionExecutor:
-    'Produces the action that must be stored in replay and sent to the motors.'
+    """Produces the action that must be stored in replay and sent to the motors."""
 
     def __init__(
         self,
@@ -340,7 +339,7 @@ class CheckpointManifest:
 
 
 class FixedPeriod:
-    'Monotonic fixed-period scheduler used by hardware deployment.'
+    """Monotonic fixed-period scheduler used by hardware deployment."""
 
     def __init__(self, period_seconds: float = CONTROL_INTERVAL_SECONDS):
         self.period_seconds = period_seconds

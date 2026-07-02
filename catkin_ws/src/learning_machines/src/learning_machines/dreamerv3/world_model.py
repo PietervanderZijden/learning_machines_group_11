@@ -39,7 +39,7 @@ class CNNEncoder(nn.Module):
         )
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
-        'Args:.'
+        """Encode an image tensor."""
         if image.dtype == torch.uint8:
             image = image.float() / 255.0
         return self.conv(image)
@@ -66,7 +66,7 @@ class CNNDecoder(nn.Module):
         )
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
-        'Args:.'
+        """Decode a latent tensor into an image."""
         x = self.fc(latent)
         x = x.view(-1, 256, 4, 4)
         return self.deconv(x)

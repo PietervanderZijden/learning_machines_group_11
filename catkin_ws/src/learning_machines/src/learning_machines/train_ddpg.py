@@ -75,7 +75,7 @@ def test_simple():
 
     # Laat de robot 3 episodes testrijden
     for episode in range(3):
-        obs = env.reset()
+        obs, _ = env.reset()
         done = False
         score = 0
         steps = 0
@@ -84,7 +84,8 @@ def test_simple():
         
         while not done:
             action, _states = model.predict(obs, deterministic=True)
-            obs, reward, done, info = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
             score += reward
             steps += 1
             
