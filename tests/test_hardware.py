@@ -31,9 +31,14 @@ class TestMoveRetry:
 
 
 class TestLazyHardwareImport:
-    def test_hardware_lazily_imported(self):
-        import importlib
-        import robobo_interface
-        importlib.reload(robobo_interface)
+    """Verify deferred hardware dependency loading."""
 
-        assert hasattr(robobo_interface, "HardwareRobobo")
+    def test_hardware_lazily_imported(self):
+        """Keep the hardware module unloaded after importing the package."""
+        import importlib
+        import sys
+        import robobo_interface
+
+        sys.modules.pop("robobo_interface.hardware", None)
+        importlib.reload(robobo_interface)
+        assert "robobo_interface.hardware" not in sys.modules

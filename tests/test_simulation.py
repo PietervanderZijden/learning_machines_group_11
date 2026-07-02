@@ -104,13 +104,15 @@ class TestDisplayDisabled:
 
 
 class TestPatchFoodContactCallback:
-    def test_food_script_patched(self, sim_robobo):
-        'After patching, the food contact script should exist.'
-        try:
-            script_handle = sim_robobo._sim.getScript(
-                sim_robobo._sim.scripttype_child, sim_robobo._robobo
-            )
-        except Exception:
-            pytest.skip("Could not retrieve child script from scene")
+    """Verify food callback correction."""
 
-        assert True
+    def test_food_script_patched(self, sim_robobo):
+        'Require both contact-handle orders to check Robobo membership.'
+        if sim_robobo._food_script is None:
+            pytest.skip("Could not retrieve child script from scene")
+        text = sim_robobo._sim.getScriptStringParam(
+            sim_robobo._food_script,
+            sim_robobo._sim.scriptstringparam_text,
+        )
+        assert "belongs_to_robobo(inData.handle1)" in text
+        assert "belongs_to_robobo(inData.handle2)" in text
