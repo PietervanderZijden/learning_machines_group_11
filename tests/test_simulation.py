@@ -106,10 +106,22 @@ class TestSleep:
 
 class TestDisplayDisabled:
     def test_display_off_or_headless(self, sim_robobo):
-        try:
-            result = sim_robobo._sim.getBoolParam(
-                sim_robobo._sim.boolparam_display_enabled
-            )
-            assert result is False, "Display should be disabled for headless speed"
-        except Exception:
-            pass
+        result = sim_robobo._sim.getBoolParam(
+            sim_robobo._sim.boolparam_display_enabled
+        )
+        assert result is False, "Display should be disabled for headless speed"
+
+
+class TestPatchFoodContactCallback:
+    """Verify food callback correction."""
+
+    def test_food_script_patched(self, sim_robobo):
+        'Require both contact-handle orders to check Robobo membership.'
+        if sim_robobo._food_script is None:
+            pytest.skip("Could not retrieve child script from scene")
+        text = sim_robobo._sim.getScriptStringParam(
+            sim_robobo._food_script,
+            sim_robobo._sim.scriptstringparam_text,
+        )
+        assert "belongs_to_robobo(inData.handle1)" in text
+        assert "belongs_to_robobo(inData.handle2)" in text

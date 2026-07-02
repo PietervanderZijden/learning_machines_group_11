@@ -6,4 +6,4 @@
 ${1:?"Specify the scene you want to load as a first argument"}
 
 # Presumes you have CoppeliaSim extracted to ./CoppeliaSim
-QT_QPA_PLATFORM=xcb coppeliasim -h "$1" $3 "-GzmqRemoteApi.rpcPort=${2:-23000}"
+QT_QPA_PLATFORM=xcb coppeliasim "$1" $3 "-GzmqRemoteApi.rpcPort=${2:-23000}"
