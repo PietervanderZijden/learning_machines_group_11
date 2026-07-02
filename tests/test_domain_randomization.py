@@ -1,4 +1,4 @@
-"""Tests for domain_randomization.py (no sim required)."""
+'Tests for domain_randomization.py (no sim required).'
 from __future__ import annotations
 
 import numpy as np
@@ -7,7 +7,7 @@ import gymnasium as gym
 
 
 class MockEnv(gym.Env):
-    """Minimal mock env that produces 3-channel HWC images (like real camera)."""
+    'Minimal mock env that produces 3-channel HWC images (like real camera).'
     metadata = {"render_modes": []}
 
     def __init__(self):

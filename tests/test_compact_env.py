@@ -1,4 +1,4 @@
-"""Tests for rl_robobo_compact_env.py (requires CoppeliaSim on port 23000)."""
+'Tests for rl_robobo_compact_env.py (requires CoppeliaSim on port 23000).'
 from __future__ import annotations
 
 import numpy as np
@@ -115,7 +115,7 @@ class TestRoboboCompactEnvStep:
         _, r1, _, _, _ = env.step(np.array([0.0, 0.0], dtype=np.float32))
         env.reset()
         _, r2, _, _, _ = env.step(np.array([0.5, 0.5], dtype=np.float32))
-        # Both should produce valid rewards (not crash)
+
         assert isinstance(r1, float)
         assert isinstance(r2, float)
         env.close()

@@ -1,4 +1,4 @@
-"""Fast, explicit CoppeliaSim connection preflight for training commands."""
+'Fast, explicit CoppeliaSim connection preflight for training commands.'
 from __future__ import annotations
 
 import socket

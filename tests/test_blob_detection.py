@@ -1,4 +1,4 @@
-"""Tests for blob_detection.py (no sim required)."""
+'Tests for blob_detection.py (no sim required).'
 from __future__ import annotations
 
 import numpy as np

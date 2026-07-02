@@ -1,4 +1,4 @@
-"""Tests for HardwareRobobo improvements."""
+'Tests for HardwareRobobo improvements.'
 from __future__ import annotations
 
 import pytest
@@ -34,9 +34,9 @@ class TestLazyHardwareImport:
     def test_hardware_not_imported_at_module_level(self):
         import robobo_interface
         import sys
-        # After import of robobo_interface, hardware module should not
-        # be in sys.modules if rospy isn't available (lazy import)
-        # This verifies the lazy import mechanism is in place
+
+
+
         assert hasattr(robobo_interface, "__getattr__"), (
             "Module should have __getattr__ for lazy imports"
         )
