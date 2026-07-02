@@ -158,7 +158,7 @@ class SimulationRobobo(IRobobo):
         )
 
     def read_irs(self) -> List[Optional[float]]:
-        'Returns sensor readings:.'
+        """Return infrared sensor readings."""
         ints, _floats, _strings, _buffer = self._sim.callScriptFunction(
             "readAllIRSensor",
             self._ir_script,
@@ -286,7 +286,7 @@ class SimulationRobobo(IRobobo):
         return WheelPosition(*ints)
 
     def sleep(self, seconds: float) -> None:
-        'Block for an amount of time using simulation stepping if enabled,.'
+        """Advance simulation time for the requested duration."""
         if not self.is_running():
             raise RuntimeError("Cannot sleep when simulation is not running")
         if self._stepping_enabled:
@@ -379,7 +379,7 @@ class SimulationRobobo(IRobobo):
         )
 
     def get_sim_time(self) -> float:
-        'Get simulation time (in seconds),.'
+        """Return simulation time in seconds."""
         return self._sim.getSimulationTime()
 
     def get_nr_food_collected(self) -> int:
@@ -424,7 +424,7 @@ class SimulationRobobo(IRobobo):
         return self._base_food_distance() > 0
 
     def _base_food_distance(self) -> float:
-        'Get the distance between the food and the base,.'
+        """Return the distance between food and the base."""
         if self._base is None:
             raise AttributeError("Scene does not have a base")
 
@@ -664,6 +664,7 @@ class SimulationRobobo(IRobobo):
             Did you specify the IP adress of your computer in scripts/setup.bash?
             """)
         self._logger(f"Looked for API at port: {api_port} at IP adress: {ip_adress}")
+        # Yes, sys.exit(1) gets caught by the zmq runtime. No, I don't know why.
         raise ConnectionError(
             f"Could not connect to CoppeliaSim at {ip_adress}:{api_port}"
         )
@@ -672,6 +673,7 @@ class SimulationRobobo(IRobobo):
 # This only works on Unix. Luckily, we are in Docker.
 def timeout(func: Callable[[], T], timeout_duration: int = 10) -> T:
     """Run a callable with a bounded wait."""
+    # set the timeout handler
     result: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
 
     def invoke() -> None:

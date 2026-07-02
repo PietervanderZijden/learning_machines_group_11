@@ -234,7 +234,7 @@ class HardwareRobobo(IRobobo):
         self._leds_srv(String(selector.value), String(color.value))
 
     def read_irs(self) -> List[Optional[float]]:
-        'Returns sensor readings:.'
+        """Return infrared sensor readings."""
         return self._irs_values
 
     def read_image_front(self) -> NDArray[numpy.uint8]:
