@@ -7,7 +7,7 @@ from learning_machines.transfer import PreActionSafetyFilter, SafetyConfig
 
 
 class SafetyWrapper(gym.Wrapper):
-    """Compatibility wrapper implementing safety before the action is executed."""
+    'Compatibility wrapper implementing safety before the action is executed.'
 
     def __init__(
         self,

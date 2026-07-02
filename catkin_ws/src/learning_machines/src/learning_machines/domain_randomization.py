@@ -1,4 +1,4 @@
-"""Hybrid persistent/per-step domain randomization shared by all algorithms."""
+'Hybrid persistent/per-step domain randomization shared by all algorithms.'
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -43,7 +43,7 @@ class RandomizationRanges:
         simulation: CalibrationProfile,
         hardware: CalibrationProfile,
     ) -> "RandomizationRanges":
-        """Derive conservative IR ranges from measured sim/hardware endpoints."""
+        'Derive conservative IR ranges from measured sim/hardware endpoints.'
         sim_span = np.array([
             abs(sensor.near_obstacle - sensor.free_space)
             for sensor in simulation.sensors
@@ -68,7 +68,7 @@ class RandomizationRanges:
 
 
 class DomainRandomizationWrapper(gym.Wrapper):
-    """Samples physical/visual parameters once per episode and noise per step."""
+    'Samples physical/visual parameters once per episode and noise per step.'
 
     def __init__(
         self,

@@ -70,16 +70,7 @@ class _ObsContext:
 
 
 class RoboboCompactEnv(gym.Env):
-    """
-    Compact Robobo env for TD-MPC2 training.
-
-    Observation:
-        Dict:
-            blob: [x, y, area, found] (4,) — green food blob detection
-            ir: [BackL, BackR, FrontL, FrontR, FrontC, FrontRR, BackC, FrontLL] (8,)
-    Action:
-        Box(-1, 1, shape=(2,)) — [left_speed, right_speed]
-    """
+    'Compact Robobo env for TD-MPC2 training.'
 
     metadata = {"render_modes": []}
 
@@ -339,10 +330,10 @@ class RoboboCompactEnv(gym.Env):
     def _read_phone_tilt(self) -> int | None:
         try:
             value = int(self.rob.read_phone_tilt())
-            # Some Robobo hardware installations actuate tilt correctly but
-            # never publish /robot/tilt, leaving the subscriber's startup
-            # value at zero. Treat impossible hardware values as unavailable;
-            # simulation retains strict feedback checking.
+
+
+
+
             if not self._is_simulation and not 26 <= value <= 109:
                 return None
             return value
@@ -350,11 +341,7 @@ class RoboboCompactEnv(gym.Env):
             return None
 
     def _settle(self, seconds: float) -> None:
-        """Advance the simulation to let physics/scripts settle.
-
-        In stepping mode this is equivalent to the requested amount of
-        simulation time without relying on wall-clock sleep.
-        """
+        'Advance the simulation to let physics/scripts settle.'
         if self._is_simulation:
             if seconds <= 0:
                 return
@@ -365,11 +352,7 @@ class RoboboCompactEnv(gym.Env):
                 self.rob.sleep(seconds)
 
     def _wait_for_tilt_script_ready(self, timeout: float) -> int | None:
-        """Wait until the tilt motor script has initialized after a restart.
-
-        CoppeliaSim child scripts initialize on the first simulation step, so
-        this helper steps the simulation until read_phone_tilt() succeeds.
-        """
+        'Wait until the tilt motor script has initialized after a restart.'
         if not self._is_simulation:
             return self._read_phone_tilt()
 
@@ -388,7 +371,7 @@ class RoboboCompactEnv(gym.Env):
         )
 
     def _initialize_camera_pose(self) -> None:
-        """Point the camera at the arena before the first observation."""
+        'Point the camera at the arena before the first observation.'
         if (
             not self.config.initialize_phone_tilt
             or not (self.config.return_image or self.config.detect_blob_from_camera)
@@ -620,7 +603,7 @@ class RoboboCompactEnv(gym.Env):
                 h, w = self.config.image_obs_size
                 image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
                 image_resized = cv2.resize(image_rgb, (w, h))
-                # CHW format for PyTorch
+
                 obs["image"] = np.transpose(image_resized, (2, 0, 1)).copy()
             else:
                 h, w = self.config.image_obs_size

@@ -88,43 +88,7 @@ PHONE_BATTERY_TOPIC = "robot/battery/phone"
 
 
 class HardwareRobobo(IRobobo):
-    """The class to use to interact with the hardware Robobo
-    Implements the IRobobo interface, and shouldn't really be used outside of that.
-
-    Specific hardware documentation of the robobo can be found at the scratch part of the Robobo docs:
-    - Actuation (Robot): http://education.theroboboproject.com/en/scratch3/base-actuation-blocks
-    - Sensors (Robot): http://education.theroboboproject.com/en/scratch3/base-sensing-blocks
-    - Actuation (Smartphone): http://education.theroboboproject.com/en/scratch3/smartphone-actuation-blocks
-    - Sensors (Smartphone): http://education.theroboboproject.com/en/scratch3/smartphone-sensing-blocks
-
-    On the hardware, read operations only update when they change, meaning that any value will
-    be 0 if it hasn't changed since initialising this class.
-
-    Blocking on the Robobo itself behaves differently than blocking on the simulation.
-    Any new call to one particular service (which is to say, a function that takes a `blockid` as argument)
-    will immediately cancel a previous unfished order.
-    So, for example, if we call `rob.move` when a previous movement command is not finished,
-    the Robobo will start executing the new command, thus changing the movement without stopping.
-    https://github.com/mintforpeople/robobo-programming/wiki/Robobo-Services#robobo-services
-
-    It is for this reason it is recommended to only use the `_blocking` functions of the robot,
-    which are inherited from the IRobobo in the format of a template method.
-
-    However, if you want the robot to move the tilt motor while also driving and such,
-    you can still experiment with them.
-
-    Arguments you should understand:
-    camera: bool = False -> Whether to initialise the camera (this makes it slower)
-
-    Arguments you only have to understand if you want to do advanced stuff:
-    xmlrpc_port: Optional[int] = None -> The port to start the xmlrps of the ROS node at.
-    If None, it will try to see if ROS_XMLRPC_PORT is set, and use that.
-    If that environment variable is not set, it will default to 45100
-    tcpros_port: Optional[int] = None -> The port to start the tcpros of the ROS node at.
-    If None, it will try to see if ROS_XMLRPC_PORT is set, and use that.
-    If that environment variable is not set, it will default to 45101
-    logger: Callable[[str], None] = print -> The function to use for logging / printing.
-    """
+    'The class to use to interact with the hardware Robobo.'
 
     def __init__(
         self,
@@ -133,12 +97,7 @@ class HardwareRobobo(IRobobo):
         tcpros_port: Optional[int] = None,
         logger: Callable[[str], None] = rospy.loginfo,
     ) -> None:
-        """This sets up the HardwareRobobo, and presumes everything is running
-        This means that this class cannot be initialised unless the Robobo is connected.
-
-        Arguments
-        camera: bool - Whether or not to enable the camera
-        """
+        'This sets up the HardwareRobobo, and presumes everything is running.'
         self._logger = logger
         self._enable_camera: bool = camera
 
@@ -209,13 +168,7 @@ class HardwareRobobo(IRobobo):
         self._logger("Succesfully initialised Learning Machines robobo controller node")
 
     def set_emotion(self, emotion: Emotion) -> None:
-        """Show the emotion of the robot.
-        For the hardware, this means showing on the phone screen.
-
-        Arguments
-
-        emotion: Emotion - What emotion to show.
-        """
+        'Show the emotion of the robot.'
         self._emotion_srv(String(emotion.value))
 
     def move(
@@ -225,20 +178,7 @@ class HardwareRobobo(IRobobo):
         millis: int,
         blockid: Optional[int] = None,
     ) -> int:
-        """Move the robot wheels for `millis` time
-        This function is asynchronous. You likely want `move_blocking` instead.
-
-        Arguments
-        left_speed: speed of the left wheel. Range: -100-0-100. 0 is no movement, negative backward.
-        right_speed: speed of the right wheel. Range: -100-0-100. 0 is no movement, negative backward.
-        millis: how many milliseconds to move the robot
-        blockid: A unique 'blockid' for end-of-movement notification at /robot/unlock/move topic.
-            Use a value that is within a 16-bit integer limit
-            If None is passed, a random available blockid is chosen.
-
-        returns:
-            the blockid
-        """
+        'Move the robot wheels for `millis` time.'
         if blockid in self._used_pids:
             raise ValueError(f"BlockID {blockid} is already in use: {self._used_pids}")
         blockid = blockid if blockid is not None else self._first_unblocked()
@@ -269,13 +209,7 @@ class HardwareRobobo(IRobobo):
     def set_wheel_speeds(
         self, left_speed: float, right_speed: float, duration_s: float = 0.4
     ) -> None:
-        """Continuously update wheel commands without an intermediate stop.
-
-        Hardware movement services cancel the previous command when a new one
-        arrives. A command duration longer than the control period therefore
-        holds motion across inference/sensor acquisition while the next command
-        replaces it seamlessly.
-        """
+        'Continuously update wheel commands without an intermediate stop.'
         hold_millis = max(200, int(round(duration_s * 3000.0)))
         self.move(
             int(numpy.clip(round(left_speed), -100, 100)),
@@ -284,51 +218,27 @@ class HardwareRobobo(IRobobo):
         )
 
     def reset_wheels(self) -> None:
-        """Allows to reset the wheel encoder positions to 0.
-        After calling this both encoders reset, making the current position the new reference
-        in position 0.
-        """
+        'Allows to reset the wheel encoder positions to 0.'
         self._reset_wheels_src()
 
     def talk(self, message: str) -> None:
-        """Let the robot speak.
-
-        Arguments
-        message: str - what to say
-        """
+        'Let the robot speak.'
         self._talk_srv(String(message))
 
     def play_emotion_sound(self, emotion: SoundEmotion) -> None:
-        """Let the robot make an emotion sound
-
-        Arguments:
-        emotion: SoundEmotion - The sound to make.
-        """
+        'Let the robot make an emotion sound.'
         self._sound_emotion_srv(String(emotion.value))
 
     def set_led(self, selector: LedId, color: LedColor) -> None:
-        """Set the led of the robot
-
-        Arguments:
-        selector: LedId
-        color: LedColor
-        """
+        'Set the led of the robot.'
         self._leds_srv(String(selector.value), String(color.value))
 
     def read_irs(self) -> List[Optional[float]]:
-        """Returns sensor readings:
-        [BackL, BackR, FrontL, FrontR, FrontC, FrontRR, BackC, FrontLL]
-
-        Notice that specs of dust or other imperfections can easily mess up individual readings.
-        """
+        'Returns sensor readings:.'
         return self._irs_values
 
     def read_image_front(self) -> NDArray[numpy.uint8]:
-        """Get the image from the front camera as a numpy array in cv2 format.
-
-        You can, for example, write this image to file with:
-        https://docs.opencv.org/3.4/d4/da8/group__imgcodecs.html#gabbc7ef1aa2edfaa87772f1202d67e0ce
-        """
+        'Get the image from the front camera as a numpy array in cv2 format.'
         if not self._enable_camera:
             raise ValueError("Camera is disabled")
 
@@ -343,23 +253,7 @@ class HardwareRobobo(IRobobo):
     def set_phone_pan(
         self, pan_position: int, pan_speed: int, blockid: Optional[int] = None
     ) -> int:
-        """Command the robot to move the smartphone holder in the horizontal (pan) axis.
-        This function is asynchronous. You likely want `set_phone_pan_blocking` instead.
-
-        Notice that the robot, especially on high speeds, doesn't always run perfectly
-
-        Arguments
-        pan_position: Angle to position the pan at. Range: 11-343.
-            Centre appears to be around 123
-            This is the goal, the result might be sloppy, and should be checked.
-        pan_speed: Movement speed for the pan mechanism. Range: 0-100.
-        blockid: A unique 'blockid' for end-of-movement notification at /robot/unlock/move topic.
-            Use a value that is within a 16-bit integer limit
-            If None is passed, a random available blockid is chosen.
-
-        returns:
-            the blockid
-        """
+        'Command the robot to move the smartphone holder in the horizontal (pan) axis.'
         if blockid in self._used_pids:
             raise ValueError(f"BlockID {blockid} is already in use: {self._used_pids}")
         blockid = blockid if blockid is not None else self._first_unblocked()
@@ -375,29 +269,13 @@ class HardwareRobobo(IRobobo):
         return blockid
 
     def read_phone_pan(self) -> int:
-        """Get the current pan of the phone. Range: 0-100
-
-        For the hardware: This isn't guaranteed to be the same calibration as the movement,
-        but unlikely to be more than one or two units off
-        """
+        'Get the current pan of the phone.'
         return self._pan
 
     def set_phone_tilt(
         self, tilt_position: int, tilt_speed: int, blockid: Optional[int] = None
     ) -> int:
-        """Command the robot to move the smartphone holder in the vertical (tilt) axis.
-        This function is asynchronous. You likely want `set_phone_tilt_blocking` instead.
-
-        Arguments
-        tilt_position: Angle to position the tilt at. Range: 26-109.
-        tilt_speed: Movement speed for the tilt mechanism. Range: 0-100.
-        blockid: A unique 'blockid' for end-of-movement notification at /robot/unlock/move topic.
-            Use a value that is within a 16-bit integer limit
-            If None is passed, a random available blockid is chosen.
-
-        returns:
-            the blockid
-        """
+        'Command the robot to move the smartphone holder in the vertical (tilt) axis.'
         if blockid in self._used_pids:
             raise ValueError(f"BlockID {blockid} is already in use: {self._used_pids}")
         blockid = blockid if blockid is not None else self._first_unblocked()
@@ -413,63 +291,39 @@ class HardwareRobobo(IRobobo):
         return blockid
 
     def read_phone_tilt(self) -> int:
-        """Get the current tilt of the phone. Range: 26-109
-
-        For the hardware: This isn't guaranteed to be the same calibration as the movement,
-        but unlikely to be more than one or two units off
-        """
+        'Get the current tilt of the phone.'
         return self._tilt
 
     def read_accel(self) -> Acceleration:
-        """Get the acceleration of the robot"""
+        'Get the acceleration of the robot.'
         return self._accel
 
     def read_orientation(self) -> Orientation:
-        """Get the orientation of the robot"""
+        'Get the orientation of the robot.'
         return self._orient
 
     def read_wheels(self) -> WheelPosition:
-        """Get the wheel orientation and speed of the robot"""
+        'Get the wheel orientation and speed of the robot.'
         return self._wheelpos
 
     def phone_battery(self) -> float:
-        """Get the battety percentage of the phone
-
-        Note that the battery nodes don't send their data frequently,
-        this might be the default value (100) if you call it in the first minute
-
-        If the battery is below 10%, this code will log it automatically,
-        so no need to implement that.
-        """
+        'Get the battety percentage of the phone.'
         return self._phone_battery_val
 
     def robot_battery(self) -> float:
-        """Get the battety percentage of the robot
-
-        Note that the battery nodes don't send their data frequently,
-        this might be the default value (100) if you call it in the first minute
-
-        If the battery is below 10%, this code will log it automatically,
-        so no need to implement that.
-        """
+        'Get the battety percentage of the robot.'
         return self._robot_battery_val
 
     def sleep(self, seconds: float) -> None:
-        """Block for a an amount of seconds.
-        How to do this depends on the kind of robot, and so is to be found here.
-        """
+        'Block for a an amount of seconds.'
         rospy.sleep(seconds)
 
     def is_blocked(self, blockid: int) -> bool:
-        """See if the robot is currently "blocked", which is to say, performing an action
-
-        Arguments:
-        blockid: the id to check
-        """
+        'See if the robot is currently "blocked", which is to say, performing an action.'
         return blockid in self._used_pids
 
     def block(self) -> None:
-        """Block untill (e.g. only return once) all blocking actions are completed"""
+        'Block untill (e.g.'
         while len(self._used_pids):
             self.sleep(0.002)
 

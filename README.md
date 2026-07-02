@@ -1,15 +1,51 @@
-# learning_machines_group_11
-# Learning Machines - Robobo Project (Group 11)
+# Robobo learning machines
 
-This is the collaborative repository for our project in the university course Learning Machines. Our goal is to develop an AI-driven controller for the Robobo robot, enabling it to navigate and complete tasks autonomously.
+## Available tasks and algorithms
 
-The codebase is designed to seamlessly interface with both the virtual robot in the simulator and the physical hardware on campus.
+| Task | Algorithms |
+| --- | --- |
+| Approach and evade | Reactive, DDPG, SAC |
+| Food collection | SAC, DreamerV3, DreamerV4-full |
+| Pushing | SAC, DreamerV3 |
 
-### Tech Stack & Environment
-* **Language:** Python 3.8 (managed via `uv`)
-* **Robot Framework:** ROS1 Noetic (fully encapsulated in Docker via OrbStack / Docker Desktop)
-* **Simulator:** CoppeliaSim Edu 
+## Setup
 
-### Key Files
-* `learning_robobo_controller.py`: The main switchboard that initializes the robot/simulator connection.
-* `test_actions.py`: The original example and reference file provided by the university.
+```sh
+uv sync
+./scripts/start_coppelia_sim.sh ./scenes/arena_approach.ttt
+```
+
+Use `python robobo.py --help` and append `--help` after a command for its
+options. Arguments after the selected task and algorithm are forwarded to the
+underlying command.
+
+## Training
+
+```sh
+python robobo.py train food sac --total-timesteps 500000
+python robobo.py train food dreamerv3 --total-steps 500000
+python robobo.py train food dreamerv4-full --total-steps 500000
+python robobo.py train push sac --total-timesteps 500000
+python robobo.py train push dreamerv3 --total-steps 500000
+python robobo.py train evade ddpg
+python robobo.py train evade sac
+```
+
+## Evaluation and validation
+
+```sh
+python robobo.py evaluate --algorithm sac --checkpoint PATH
+python robobo.py validate simulation --steps 2000
+python robobo.py validate hardware
+python robobo.py run evade ddpg
+python robobo.py run evade sac
+```
+
+## Hardware deployment
+
+```sh
+python robobo.py deploy food sac --checkpoint PATH --calibration config/calibration/hardware.json
+python robobo.py deploy food dreamerv3 --checkpoint PATH --calibration config/calibration/hardware.json
+python robobo.py deploy food dreamerv4-full --checkpoint PATH --calibration config/calibration/hardware.json
+python robobo.py deploy push dreamerv3 --checkpoint PATH
+```

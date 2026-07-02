@@ -1,0 +1,55 @@
+{
+  "name": "hardware",
+  "sensors": {
+    "BackL": {
+      "free_space": 7.0,
+      "near_obstacle": 33.0,
+      "polarity": 1,
+      "exponent": 1.0
+    },
+    "BackR": {
+      "free_space": 9.0,
+      "near_obstacle": 50.0,
+      "polarity": 1,
+      "exponent": 1.0
+    },
+    "FrontL": {
+      "free_space": 35.0,
+      "near_obstacle": 55.0,
+      "polarity": 1,
+      "exponent": 1.0
+    },
+    "FrontR": {
+      "free_space": 37.0,
+      "near_obstacle": 56.0,
+      "polarity": 1,
+      "exponent": 1.0
+    },
+    "FrontC": {
+      "free_space": 11.0,
+      "near_obstacle": 42.0,
+      "polarity": 1,
+      "exponent": 1.0
+    },
+    "FrontRR": {
+      "free_space": 8.0,
+      "near_obstacle": 38.0,
+      "polarity": 1,
+      "exponent": 1.0
+    },
+    "BackC": {
+      "free_space": 14.0,
+      "near_obstacle": 50.0,
+      "polarity": 1,
+      "exponent": 1.0
+    },
+    "FrontLL": {
+      "free_space": 9.0,
+      "near_obstacle": 32.0,
+      "polarity": 1,
+      "exponent": 1.0
+    }
+  },
+  "version": "robobo-obs-v2",
+  "source": "hardware:ir_calibration_samples.csv"
+}

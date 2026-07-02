@@ -30,7 +30,7 @@ class RoboboObstacleEnvConfig:
     progress_normalizer_m: float = 0.05
     progress_reward_scale: float = 2.0
 
-    distance_bonus_scale: float = 0.1
+    distance_bonus_scale: float = 0.0
 
     obstacle_penalty_scale: float = 0.15
     front_obstacle_penalty_scale: float = 0.25
@@ -38,13 +38,22 @@ class RoboboObstacleEnvConfig:
     action_penalty_scale: float = 0.0
 
     turning_penalty_scale: float = 0.02
+    spin_penalty_scale: float = 0.08
+
     alive_bonus: float = 0.01
     collision_penalty: float = 5.0
 
-    idle_penalty_scale: float = 0.3
+    idle_penalty_scale: float = 0.15
     idle_speed_threshold: float = 0.15
 
-    movement_bonus_scale: float = 0.3
+    movement_bonus_scale: float = 0.05
+
+    low_displacement_penalty_scale: float = 0.08
+    low_displacement_threshold_m: float = 0.01
+
+    near_start_penalty_scale: float = 0.02
+    near_start_distance_threshold_m: float = 0.10
+    near_start_grace_steps: int = 20
 
     fc_early_penalty_scale: float = 0.1
     fc_early_threshold: float = 0.15
@@ -56,25 +65,7 @@ class RoboboObstacleEnvConfig:
 
 
 class RoboboObstacleAvoidanceEnv(gym.Env):
-    """
-    Observation:
-        Dict:
-            ir:
-                Normalized IR sensor readings: [BackL, BackR, FrontL, FrontR,
-                FrontC, FrontRR, BackC, FrontLL]
-                Shape: (8,)
-                Dtype: float32
-
-    Action:
-        Box(-1, 1, shape=(2,))
-            action[0] = left wheel command
-            action[1] = right wheel command
-
-    Reward objective:
-        Keep moving as far as possible from the episode start while avoiding
-        collisions. The robot is penalised for idling so it cannot exploit the
-        alive_bonus by sitting still.
-    """
+    'Observation:.'
 
     metadata = {"render_modes": []}
 
@@ -88,17 +79,16 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         self.rob = rob or SimulationRobobo()
         self.config = config or RoboboObstacleEnvConfig()
 
-        # height, width = self.config.image_size
+        height, width = self.config.image_size
 
         self.observation_space = spaces.Dict(
             {
-                # CAMERA UITGEZET
-                # "image": spaces.Box(
-                #     low=0,
-                #     high=255,
-                #     shape=(1, height, width),
-                #     dtype=np.uint8,
-                # ),
+                "image": spaces.Box(
+                    low=0,
+                    high=255,
+                    shape=(1, height, width),
+                    dtype=np.uint8,
+                ),
                 "ir": spaces.Box(
                     low=0.0,
                     high=1.0,
@@ -127,6 +117,8 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
 
         self._episode_start_position = self._initial_position
         self._previous_distance_from_start = 0.0
+        self._best_distance_from_start = 0.0
+        self._previous_position = self._initial_position
         self._step_count = 0
 
     def reset(
@@ -141,6 +133,8 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
 
         self._episode_start_position = self.rob.get_position()
         self._previous_distance_from_start = 0.0
+        self._best_distance_from_start = 0.0
+        self._previous_position = self._episode_start_position
         self._step_count = 0
 
         obs = self._get_obs()
@@ -184,6 +178,7 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         info["right_speed"] = right_speed
         info["action_left"] = float(action[0])
         info["action_right"] = float(action[1])
+        info["wheel_difference"] = float(abs(action[0] - action[1]))
 
         return obs, reward, terminated, truncated, info
 
@@ -202,8 +197,7 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
 
     def _get_obs(self) -> dict[str, np.ndarray]:
         return {
-            # CAMERA UITGEZET
-            # "image": self._read_grayscale_image(),
+            "image": self._read_grayscale_image(),
             "ir": self._read_normalized_irs(),
         }
 
@@ -252,6 +246,10 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             position,
         )
 
+        step_displacement = self._xy_distance(
+            self._previous_position,
+            position,
+        )
         ir = obs["ir"]
 
         front_obstacle_closeness = float(np.max(ir[FRONT_IR_INDICES]))
@@ -265,6 +263,7 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             "y": float(position.y),
             "z": float(position.z),
             "distance_from_start": float(distance_from_start),
+            "step_displacement": float(step_displacement),
             "front_obstacle_closeness": front_obstacle_closeness,
             "back_obstacle_closeness": back_obstacle_closeness,
             "max_obstacle_closeness": max_obstacle_closeness,
@@ -273,16 +272,32 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
         }
 
     def _compute_reward(
-        self, action: np.ndarray, info: dict[str, Any], terminated: bool, obs
+        self,
+        action: np.ndarray,
+        info: dict[str, Any],
+        terminated: bool,
+        obs: dict[str, np.ndarray],
     ) -> float:
+        current_position = self.rob.get_position()
         current_distance = float(info["distance_from_start"])
+        step_displacement = float(info["step_displacement"])
 
-        progress = current_distance - self._previous_distance_from_start
+        record_progress = max(
+            0.0,
+            current_distance - self._best_distance_from_start,
+        )
+
+        self._best_distance_from_start = max(
+            self._best_distance_from_start,
+            current_distance,
+        )
+
         self._previous_distance_from_start = current_distance
+        self._previous_position = current_position
 
         normalized_progress = np.clip(
-            progress / self.config.progress_normalizer_m,
-            -1.0,
+            record_progress / self.config.progress_normalizer_m,
+            0.0,
             1.0,
         )
 
@@ -312,27 +327,44 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
                 fc_value - self.config.fc_early_threshold
             )
 
-        action_penalty = self.config.action_penalty_scale * float(
-            np.mean(np.abs(action))
-        )
+        mean_abs_action = float(np.mean(np.abs(action)))
+
+        action_penalty = self.config.action_penalty_scale * mean_abs_action
+
+        wheel_difference = float(abs(action[0] - action[1]))
+        spin_penalty = self.config.spin_penalty_scale * wheel_difference
 
         turning_penalty = 0.0
         if action[0] * action[1] < 0.0:
-            turning_penalty = self.config.turning_penalty_scale
+            turning_penalty = self.config.turning_penalty_scale * wheel_difference
 
-        mean_abs_action = float(np.mean(np.abs(action)))
         idle_penalty = 0.0
         if mean_abs_action < self.config.idle_speed_threshold:
             idle_penalty = self.config.idle_penalty_scale * (
                 1.0 - mean_abs_action / self.config.idle_speed_threshold
             )
 
-        forward_component = float((action[0] + action[1]) / 2.0)
-        movement_bonus = (
-            self.config.movement_bonus_scale * forward_component
-            if forward_component > 0.0
-            else 0.0
-        )
+        low_displacement_penalty = 0.0
+        if step_displacement < self.config.low_displacement_threshold_m:
+            low_displacement_penalty = self.config.low_displacement_penalty_scale * (
+                1.0 - step_displacement / self.config.low_displacement_threshold_m
+            )
+
+        near_start_penalty = 0.0
+        if (
+            self._step_count > self.config.near_start_grace_steps
+            and current_distance < self.config.near_start_distance_threshold_m
+        ):
+            near_start_penalty = self.config.near_start_penalty_scale * (
+                1.0 - current_distance / self.config.near_start_distance_threshold_m
+            )
+
+        forward_component = float(min(action[0], action[1]))
+
+        if forward_component > 0.0:
+            movement_bonus = self.config.movement_bonus_scale * forward_component
+        else:
+            movement_bonus = self.config.movement_bonus_scale * forward_component * 2.0
 
         reward = (
             progress_reward
@@ -343,8 +375,11 @@ class RoboboObstacleAvoidanceEnv(gym.Env):
             - front_obstacle_penalty
             - fc_early_penalty
             - idle_penalty
+            - low_displacement_penalty
+            - near_start_penalty
             - action_penalty
             - turning_penalty
+            - spin_penalty
         )
 
         if terminated:

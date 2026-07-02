@@ -1,4 +1,4 @@
-"""Tests for SimulationRobobo improvements."""
+'Tests for SimulationRobobo improvements.'
 from __future__ import annotations
 
 import math

@@ -15,17 +15,7 @@ from robobo_interface import SimulationRobobo
 
 
 class MultiRoboboObstacleAvoidanceEnv(gym.Env):
-    """
-    Gymnasium wrapper that trains on multiple Robobo instances in one
-    CoppeliaSim scene.
-
-    Each Robobo is selected by passing a different `identifier` to
-    SimulationRobobo(identifier=...).
-
-    The active robot/environment is selected at reset. After
-    `switch_every_steps` steps, the episode is truncated so SB3 resets the env
-    and a new robot/environment is sampled.
-    """
+    'Gymnasium wrapper that trains on multiple Robobo instances in one.'
 
     metadata = {"render_modes": []}
 
@@ -34,7 +24,7 @@ class MultiRoboboObstacleAvoidanceEnv(gym.Env):
         identifiers: Sequence[int] = (0, 1, 2),
         config: Optional[RoboboObstacleEnvConfig] = None,
         switch_every_steps: int = 500,
-        avoid_immediate_repeat: bool = True,
+        avoid_immediate_repeat: bool = False,
     ) -> None:
         super().__init__()
 
@@ -148,10 +138,7 @@ class MultiRoboboObstacleAvoidanceEnv(gym.Env):
 
 @dataclass
 class DomainRandomizationConfig:
-    """
-    Training-time randomization to make the policy less dependent on exact
-    simulator sensor values, camera appearance and perfect wheel commands.
-    """
+    'Training-time randomization to make the policy less dependent on exact.'
 
     enabled: bool = True
 
@@ -175,14 +162,7 @@ class DomainRandomizationConfig:
 
 
 class RoboboDomainRandomizationWrapper(gym.Wrapper):
-    """
-    Applies domain randomization during training.
-
-    Randomizes:
-        - IR scale, bias, Gaussian noise and occasional dropout
-        - image brightness, contrast, noise and blur
-        - action scale, bias, Gaussian noise and occasional one-step latency
-    """
+    'Applies domain randomization during training.'
 
     def __init__(
         self,
@@ -271,7 +251,7 @@ class RoboboDomainRandomizationWrapper(gym.Wrapper):
             return obs
 
         randomized_obs = {
-            # CAMERA UITGEZET: "image": self._randomize_image(obs["image"]),
+            "image": self._randomize_image(obs["image"]),
             "ir": self._randomize_ir(obs["ir"]),
         }
 

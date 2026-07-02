@@ -27,36 +27,7 @@ T = TypeVar("T")
 
 
 class SimulationRobobo(IRobobo):
-    """The simulation robot.
-
-    A few functions take blockid. When they do, they are not blocking. If you call
-    these while the action is still blocked with a new blockid
-    stuff might go seriously wrong, and the robot might halt indefinitely.
-
-    Since the behaviour of non-blocking functions is different from Simulation to Hardware,
-    it is recommended to only use the `_blocking` functions of the robot,
-    which are inherited from the IRobobo in the format of a template method.
-
-    However, if you want the robot to move the tilt motor while also driving and such,
-    you can still experiment with them.
-
-    Some functions start with `read_` others with `get_`
-    Information retrieved from `read_` is available in hardware, that from `get_` not.
-
-    Arguments you should understand:
-    identifier: int = 0 -> The value number to use. If you have one robobo in the scene,
-    or want to use the first one, this is 0. Else, increase the value
-
-    Arguments you only have to understand if you want to do advanced stuff:
-    api_port: Optional[int] = None -> The port at which to look for the CoppeliaSim API.
-    If None, it will try to see if COPPELIA_SIM_PORT is set, and use that.
-    If that environment variable is not set, it will default to 23000
-    ip_adress: Optional[str] = None -> The TCP address at which to look for the CoppeliaSim API.
-    If None, it will try to see if COPPELIA_SIM_IP is set, and use that.
-    If that environment variable is not set, it will default to "0.0.0.0"
-    logger: Callable[[str], None] = print -> The function to use for logging / printing.
-    timeout_dur: int -> The amount of time to wait for API calls before erroring out.
-    """
+    'The simulation robot.'
 
     def __init__(
         self,
@@ -74,8 +45,8 @@ class SimulationRobobo(IRobobo):
         if api_port is None:
             api_port = int(os.getenv("COPPELIA_SIM_PORT", "23000"))
 
-        # 127.0.0.1 is the correct destination when CoppeliaSim runs locally.
-        # 0.0.0.0 is a server bind address and is not a portable client target.
+
+
         if ip_adress is None:
             ip_adress = os.getenv("COPPELIA_SIM_IP", "127.0.0.1")
 
@@ -95,17 +66,17 @@ class SimulationRobobo(IRobobo):
         except TimeoutError:
             self._fail_connect(api_port, ip_adress)
 
-        # Transfer contract: one 400 ms simulation/policy step containing
-        # 5 ms internal dynamics substeps.
+
+
         if self._sim.getSimulationState() != self._sim.simulation_stopped:
             self.stop_simulation()
         self.configure_simulation_timing()
 
-        # Opt 8: Disable rendering for maximum speed (only works with GUI)
+
         try:
             self._sim.setBoolParam(self._sim.boolparam_display_enabled, False)
         except Exception:
-            pass  # Headless mode has no display to disable
+            pass
 
         self._initialise_handles()
         self._patch_food_contact_callback()
@@ -115,13 +86,7 @@ class SimulationRobobo(IRobobo):
             Connected to robot: {self._identifier}""")
 
     def set_emotion(self, emotion: Emotion) -> None:
-        """Show the emotion of the robot on the screen
-        For the hardware, that means printing... for now.
-        The one that was in the example from mintforpeople does not work.
-
-        Arguments
-        emotion: Emotion - What emotion to show.
-        """
+        'Show the emotion of the robot on the screen.'
         self._logger(f"The robot shows {emotion.value} on its screen")
 
     def move(
@@ -131,19 +96,7 @@ class SimulationRobobo(IRobobo):
         millis: int,
         blockid: Optional[int] = None,
     ) -> int:
-        """Move the robot wheels for `millis` time
-        This function is asynchronous. You likely want `move_blocking` instead.
-
-        Arguments
-        left_speed: speed of the left wheel. Range: -100-0-100. 0 is no movement, negative backward.
-        right_speed: speed of the right wheel. Range: -100-0-100. 0 is no movement, negative backward.
-        millis: how many millisecond to move the robot
-        blockid: A unique blockid to test if the robot is still perfoming the action.
-            If None is passed, a random available blockid is chosen.
-
-        returns:
-            the blockid
-        """
+        'Move the robot wheels for `millis` time.'
         if not self.is_running():
             raise RuntimeError("Cannot move wheels when simulation is not running")
         if blockid in self._used_pids:
@@ -163,10 +116,7 @@ class SimulationRobobo(IRobobo):
         return blockid
 
     def reset_wheels(self) -> None:
-        """Allows to reset the wheel encoder positions to 0.
-        After calling this both encoders reset, making the current position the new reference
-        in position 0.
-        """
+        'Allows to reset the wheel encoder positions to 0.'
         if not self.is_running():
             raise RuntimeError("Cannot reset wheels when simulation is not running")
         self._sim.callScriptFunction(
@@ -179,30 +129,15 @@ class SimulationRobobo(IRobobo):
         )
 
     def talk(self, message: str) -> None:
-        """Let the robot speak.
-        For the simultion, this is just printing.
-
-        Arguments
-        message: str - what to say
-        """
+        'Let the robot speak.'
         self._logger(f"The robot {self._identifier} says: {message}")
 
     def play_emotion_sound(self, emotion: SoundEmotion) -> None:
-        """Let the robot make an emotion sound
-        For the simultion, this is just printing.
-
-        Arguments:
-        emotion: SoundEmotion - The sound to make.
-        """
+        'Let the robot make an emotion sound.'
         self._logger(f"The robot {self._identifier} makes sound: {emotion.value}")
 
     def set_led(self, selector: LedId, color: LedColor) -> None:
-        """Set the led of the robot
-
-        Arguments:
-        selector: LedId
-        color: LedColor
-        """
+        'Set the led of the robot.'
         if not self.is_running():
             raise RuntimeError("Cannot set leds when simulation is not running")
         self._sim.callScriptFunction(
@@ -215,9 +150,7 @@ class SimulationRobobo(IRobobo):
         )
 
     def read_irs(self) -> List[Optional[float]]:
-        """Returns sensor readings:
-        [BackL, BackR, FrontL, FrontR, FrontC, FrontRR, BackC, FrontLL]
-        """
+        'Returns sensor readings:.'
         ints, _floats, _strings, _buffer = self._sim.callScriptFunction(
             "readAllIRSensor",
             self._ir_script,
@@ -229,11 +162,7 @@ class SimulationRobobo(IRobobo):
         return list(ints)
 
     def read_image_front(self) -> NDArray[numpy.uint8]:
-        """Get the image from the front camera as a numpy array in cv2 format.
-
-        You can, for example, write this image to file with:
-        https://docs.opencv.org/3.4/d4/da8/group__imgcodecs.html#gabbc7ef1aa2edfaa87772f1202d67e0ce
-        """
+        'Get the image from the front camera as a numpy array in cv2 format.'
         img, [resX, resY] = self._sim.getVisionSensorImg(self._smartphone_camera)
         img = numpy.frombuffer(img, dtype=numpy.uint8).reshape(resY, resX, 3)
 
@@ -246,18 +175,7 @@ class SimulationRobobo(IRobobo):
     def set_phone_pan(
         self, pan_position: int, pan_speed: int, blockid: Optional[int] = None
     ) -> int:
-        """Command the robot to move the smartphone holder in the horizontal (pan) axis.
-        This function is asynchronous. You likely want `set_phone_pan_blocking` instead.
-
-        Arguments
-        pan_position: Angle to position the pan at. Range: 11-343.
-        pan_speed: Movement speed for the pan mechanism. Range: 0-100.
-        blockid: A unique blockid to test if the robot is still perfoming the action.
-            If None is passed, a random available blockid is chosen.
-
-        returns:
-            the blockid
-        """
+        'Command the robot to move the smartphone holder in the horizontal (pan) axis.'
         if not self.is_running():
             raise RuntimeError("Cannot set phone pan when simulation is not running")
         if blockid in self._used_pids:
@@ -277,7 +195,7 @@ class SimulationRobobo(IRobobo):
         return blockid
 
     def read_phone_pan(self) -> int:
-        """Get the current pan of the phone. Range: 0-100"""
+        'Get the current pan of the phone.'
         ints, _floats, _strings, _buffer = self._sim.callScriptFunction(
             "readPanPosition",
             self._pan_motor_script,
@@ -291,18 +209,7 @@ class SimulationRobobo(IRobobo):
     def set_phone_tilt(
         self, tilt_position: int, tilt_speed: int, blockid: Optional[int] = None
     ) -> int:
-        """Command the robot to move the smartphone holder in the vertical (tilt) axis.
-        This function is asynchronous. You likely want `set_phone_tilt_blocking` instead.
-
-        Arguments
-        tilt_position: Angle to position the tilt at. Range: 26-109.
-        tilt_speed: Movement speed for the tilt mechanism. Range: 0-100.
-        blockid: A unique blockid to test if the robot is still perfoming the action.
-            If None is passed, a random available blockid is chosen.
-
-        returns:
-            the blockid
-        """
+        'Command the robot to move the smartphone holder in the vertical (tilt) axis.'
         if not self.is_running():
             raise RuntimeError("Cannot set phone tilt when simulation is not running")
         if blockid in self._used_pids:
@@ -322,7 +229,7 @@ class SimulationRobobo(IRobobo):
         return blockid
 
     def read_phone_tilt(self) -> int:
-        """Get the current tilt of the phone. Range: 26-109"""
+        'Get the current tilt of the phone.'
         ints, _floats, _strings, _buffer = self._sim.callScriptFunction(
             "readTiltPosition",
             self._tilt_motor_script,
@@ -335,7 +242,7 @@ class SimulationRobobo(IRobobo):
         return int(ints[0])
 
     def read_accel(self) -> Acceleration:
-        """Get the acceleration of the robot"""
+        'Get the acceleration of the robot.'
         _ints, floats, _strings, _buffer = self._sim.callScriptFunction(
             "readAccelerationSensor",
             self._smartphone_script,
@@ -347,7 +254,7 @@ class SimulationRobobo(IRobobo):
         return Acceleration(*floats)
 
     def read_orientation(self) -> Orientation:
-        """Get the orientation of the robot"""
+        'Get the orientation of the robot.'
         _ints, floats, _strings, _buffer = self._sim.callScriptFunction(
             "readOrientationSensor",
             self._smartphone_script,
@@ -359,7 +266,7 @@ class SimulationRobobo(IRobobo):
         return Orientation(*floats)
 
     def read_wheels(self) -> WheelPosition:
-        """Get the wheel orientation and speed of the robot"""
+        'Get the wheel orientation and speed of the robot.'
         ints, _floats, _strings, _buffer = self._sim.callScriptFunction(
             "readWheels",
             self._wheels_script,
@@ -371,8 +278,7 @@ class SimulationRobobo(IRobobo):
         return WheelPosition(*ints)
 
     def sleep(self, seconds: float) -> None:
-        """Block for an amount of time using simulation stepping if enabled,
-        otherwise fall back to wall-clock sleep."""
+        'Block for an amount of time using simulation stepping if enabled,.'
         if not self.is_running():
             raise RuntimeError("Cannot sleep when simulation is not running")
         if self._stepping_enabled:
@@ -404,11 +310,7 @@ class SimulationRobobo(IRobobo):
                 time.sleep(0.002)
 
     def is_blocked(self, blockid: int) -> bool:
-        """See if the robot is currently "blocked", which is to say, performing an action
-
-        Arguments:
-        blockid: the id to check
-        """
+        'See if the robot is currently "blocked", which is to say, performing an action.'
         res = self._sim.getIntProperty(
             self._sim.handle_scene, self._block_string(blockid)
         )
@@ -420,12 +322,12 @@ class SimulationRobobo(IRobobo):
             return True
 
     def block(self):
-        """Block untill (only return once) all blocking actions are completed"""
+        'Block untill (only return once) all blocking actions are completed.'
         while any(self.is_blocked(blockid) for blockid in self._used_pids):
             self.sleep(0.002)
 
     def play_simulation(self):
-        """Start the simulation"""
+        'Start the simulation.'
         self._sim.startSimulation()
         for _ in range(100):
             if self.is_running():
@@ -435,7 +337,7 @@ class SimulationRobobo(IRobobo):
             raise RuntimeError("Simulation failed to start")
 
     def pause_simulation(self):
-        """Pause the simulation"""
+        'Pause the simulation.'
         self._sim.pauseSimulation()
         for _ in range(100):
             if self.is_paused():
@@ -445,7 +347,7 @@ class SimulationRobobo(IRobobo):
             raise RuntimeError("Simulation failed to pause")
 
     def stop_simulation(self):
-        """Stop the simulation"""
+        'Stop the simulation.'
         self._sim.stopSimulation()
         for _ in range(100):
             if self.is_stopped():
@@ -455,15 +357,15 @@ class SimulationRobobo(IRobobo):
             raise RuntimeError("Simulation failed to stop")
 
     def is_stopped(self) -> bool:
-        """Return wether the simulation is stopped"""
+        'Return wether the simulation is stopped.'
         return self._sim.getSimulationState() == self._sim.simulation_stopped
 
     def is_paused(self) -> bool:
-        """Return wether the simulation is stopped"""
+        'Return wether the simulation is stopped.'
         return self._sim.getSimulationState() == self._sim.simulation_paused
 
     def is_running(self) -> bool:
-        """Return wether the simulation is running"""
+        'Return wether the simulation is running.'
         # There are 6 different types of running we don't care about
         state = self._sim.getSimulationState()
         return (state != self._sim.simulation_stopped) and (
@@ -471,17 +373,11 @@ class SimulationRobobo(IRobobo):
         )
 
     def get_sim_time(self) -> float:
-        """Get simulation time (in seconds),
-        returning the last value if the simulation is stopped
-        """
+        'Get simulation time (in seconds),.'
         return self._sim.getSimulationTime()
 
     def get_nr_food_collected(self) -> int:
-        """Return the amount of food currently collected.
-
-        This only works in the simulation
-        Trivially doesn't work when the simulation does not have any food.
-        """
+        'Return the amount of food currently collected.'
         ints, _floats, _strings, _buffer = self._sim.callScriptFunction(
             "remote_get_collected_food",
             self._food_script,
@@ -493,36 +389,24 @@ class SimulationRobobo(IRobobo):
         return ints[0]
 
     def get_position(self) -> Position:
-        """Get the position of the Robobo (Relative to the world)
-
-        This only works in the simulation.
-        """
+        'Get the position of the Robobo (Relative to the world).'
         pos = self._sim.getObjectPosition(self._robobo, self._sim.handle_world)
         return Position(*pos)
 
     def get_orientation(self) -> Orientation:
-        """Get the orientation of the Robobo (Relative to the world)
-
-        This only works in the simulation.
-        """
+        'Get the orientation of the Robobo (Relative to the world).'
         orient = self._sim.getObjectOrientation(self._robobo, self._sim.handle_world)
         return Orientation(*orient)
 
     def set_position(self, position: Position, orientation: Orientation) -> None:
-        """Set the position of the Robobo in the simulation
-        More information at: https://manual.coppeliarobotics.com/en/positionOrientationTransformation.htm
-        """
+        'Set the position of the Robobo in the simulation.'
         self._sim.setObjectPosition(self._robobo, [position.x, position.y, position.z])
         self._sim.setObjectOrientation(
             self._robobo, [orientation.yaw, orientation.pitch, orientation.roll]
         )
 
     def get_base_position(self) -> Position:
-        """Get the position of the base to deliver food at.
-
-        This only works in the simulation.
-        Trivially doesn't work when the simulation does not have a base.
-        """
+        'Get the position of the base to deliver food at.'
         if self._base is None:
             raise AttributeError("Scene does not have a base")
 
@@ -530,20 +414,11 @@ class SimulationRobobo(IRobobo):
         return Position(*pos)
 
     def base_detects_food(self) -> bool:
-        """Get whether the base detects food on top of it.
-
-        This only works in the simulation.
-        Trivially doesn't work when the simulation does not have a base or food.
-        """
+        'Get whether the base detects food on top of it.'
         return self._base_food_distance() > 0
 
     def _base_food_distance(self) -> float:
-        """Get the distance between the food and the base,
-        0 if the food is too far away (which is to say, not on the plate)
-
-        This only works in the simulation.
-        Trivially doesn't work when the simulation does not have a base or food.
-        """
+        'Get the distance between the food and the base,.'
         if self._base is None:
             raise AttributeError("Scene does not have a base")
 
@@ -564,9 +439,7 @@ class SimulationRobobo(IRobobo):
         return ret
 
     def _block_string(self, blockid: int) -> str:
-        """Return some unique string based on the identifier and the blockid
-        to make sure they don't overlap
-        """
+        'Return some unique string based on the identifier and the blockid.'
         # This is technically overkill with the new properties instead of the old signals,
         # But re-doing that would require rewriting some stuff that's not really worth it.
         return f"signal.block_{self._id}_{blockid}"
@@ -617,18 +490,12 @@ class SimulationRobobo(IRobobo):
         return ret
 
     def _initialise_fast_handles(self) -> None:
-        """Cache joint object handles for direct velocity control (RL fast path)."""
+        'Cache joint object handles for direct velocity control (RL fast path).'
         self._left_motor_joint = self._get_object(f"/Robobo{self._identifier}/Left_Motor")
         self._right_motor_joint = self._get_object(f"/Robobo{self._identifier}/Right_Motor")
 
     def configure_simulation_timing(self) -> None:
-        """Restore 400 ms control steps with 5 ms internal dynamics.
-
-        CoppeliaSim distinguishes its simulation step from the physics-engine
-        step. Keeping the simulation step at the policy interval lets a single
-        synchronous remote step advance one transition, while the dynamics
-        engine still integrates that transition in 80 substeps.
-        """
+        'Restore 400 ms control steps with 5 ms internal dynamics.'
         if self._sim.getSimulationState() != self._sim.simulation_stopped:
             raise RuntimeError("simulation timing can only be configured while stopped")
         self._sim.setFloatParam(self._sim.floatparam_simulation_time_step, 0.4)
@@ -650,12 +517,7 @@ class SimulationRobobo(IRobobo):
         self._client.setStepping(True)
 
     def _patch_food_contact_callback(self) -> None:
-        """Make food collection independent of contact handle ordering.
-
-        The supplied scene only checked ``handle1`` and commented out the
-        equivalent ``handle2`` branch. CoppeliaSim does not guarantee which
-        colliding object is first, so valid robot-food contacts could be lost.
-        """
+        'Make food collection independent of contact handle ordering.'
         if self._food_script is None or not self.is_stopped():
             return
         try:
@@ -748,11 +610,7 @@ class SimulationRobobo(IRobobo):
             self._logger(f"Warning: could not patch Food contact callback: {exc}")
 
     def _robobo_speed_to_rad_s(self, speed: float, duration_s: float) -> float:
-        """Convert Robobo -100..100 speed to rad/s for sim.setJointTargetVelocity().
-
-        Uses the cubic polynomial from the upstream Robobo Gazebo plugin
-        (move_wheels.cpp), which models the motor's actual velocity profile.
-        """
+        'Convert Robobo -100..100 speed to rad/s for sim.setJointTargetVelocity().'
         if speed == 0.0:
             return 0.0
 
@@ -778,20 +636,14 @@ class SimulationRobobo(IRobobo):
         return sign * velocity_rad_s
 
     def set_wheel_speeds(self, left_speed: float, right_speed: float, duration_s: float = 0.4) -> None:
-        """Set wheel velocities, converting Robobo -100..100 units to rad/s.
-
-        Args:
-            left_speed: Left wheel speed in Robobo units (-100 to 100).
-            right_speed: Right wheel speed in Robobo units (-100 to 100).
-            duration_s: Action duration in seconds (default 0.4 for 400ms steps).
-        """
+        'Set wheel velocities, converting Robobo -100..100 units to rad/s.'
         left_vel = self._robobo_speed_to_rad_s(left_speed, duration_s)
         right_vel = self._robobo_speed_to_rad_s(right_speed, duration_s)
         self._sim.setJointTargetVelocity(self._left_motor_joint, left_vel)
         self._sim.setJointTargetVelocity(self._right_motor_joint, right_vel)
 
     def step_simulation(self, steps: int = 1) -> None:
-        """Advance simulation by exactly N timesteps. No polling, no sleep."""
+        'Advance simulation by exactly N timesteps.'
         for _ in range(steps):
             self._client.step()
 
