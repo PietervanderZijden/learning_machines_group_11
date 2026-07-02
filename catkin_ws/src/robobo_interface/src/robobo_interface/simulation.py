@@ -81,12 +81,6 @@ class SimulationRobobo(IRobobo):
 
         try:
             self._sim.setBoolParam(
-                self._sim.boolparam_realtime_simulation, False
-            )
-        except (AttributeError, RuntimeError):
-            pass
-        try:
-            self._sim.setBoolParam(
                 self._sim.boolparam_display_enabled, rendering_enabled
             )
         except Exception:
@@ -512,6 +506,8 @@ class SimulationRobobo(IRobobo):
             raise RuntimeError("simulation timing can only be configured while stopped")
         self._sim.setFloatParam(self._sim.floatparam_simulation_time_step, 0.4)
         self._sim.setFloatParam(self._sim.floatparam_physicstimestep, 0.005)
+        self._sim.setBoolParam(self._sim.boolparam_realtime_simulation, False)
+        self._sim.setInt32Param(self._sim.intparam_idle_fps, 0)
         simulation_dt = float(self._sim.getSimulationTimeStep())
         dynamics_dt = float(
             self._sim.getFloatParam(self._sim.floatparam_physicstimestep)

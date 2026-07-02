@@ -23,11 +23,26 @@ class TestConnection:
 
 
 class TestConfigureSimulationTiming:
-    def test_sets_time_step(self, sim_robobo):
+    def test_sets_simulation_time_step(self, sim_robobo):
         sim_robobo.stop_simulation()
         sim_robobo.configure_simulation_timing()
         dt = sim_robobo._sim.getSimulationTimeStep()
+        assert math.isclose(dt, 0.4, abs_tol=1e-6), f"Expected 400 ms, got {dt}"
+
+    def test_sets_physics_time_step(self, sim_robobo):
+        sim_robobo.stop_simulation()
+        sim_robobo.configure_simulation_timing()
+        dt = self._physics_time_step(sim_robobo)
         assert math.isclose(dt, 0.005, abs_tol=1e-6), f"Expected 5 ms, got {dt}"
+
+    @staticmethod
+    def _physics_time_step(sim_robobo):
+        """Return the configured dynamics timestep."""
+        return float(
+            sim_robobo._sim.getFloatParam(
+                sim_robobo._sim.floatparam_physicstimestep
+            )
+        )
 
     def test_raises_if_running(self, sim_robobo):
         sim_robobo.play_simulation()
