@@ -1,7 +1,9 @@
 import math
 import os
+import queue
 import signal
 import sys
+import threading
 import time
 from typing import Callable, List, NoReturn, Optional, TypeVar
 
@@ -36,9 +38,12 @@ class SimulationRobobo(IRobobo):
         ip_adress: Optional[str] = None,
         logger: Callable[[str], None] = print,
         timeout_dur: int = 10,
+        rendering_enabled: bool = False,
     ):
+        """Connect to a CoppeliaSim Robobo interface."""
         self._id = identifier
         self._logger = logger
+        self._timeout_dur = float(timeout_dur)
         self._used_pids: LockedSet[int] = LockedSet()
         self._identifier = f"[{identifier}]"
 
@@ -47,6 +52,8 @@ class SimulationRobobo(IRobobo):
 
 
 
+        # 0.0.0.0 to connect to the current computer on Linux, with `--net=host`
+        # This doesn't work on Windows or MacOS. There, the variable needs to be specified.
         if ip_adress is None:
             ip_adress = os.getenv("COPPELIA_SIM_IP", "127.0.0.1")
 
@@ -72,9 +79,16 @@ class SimulationRobobo(IRobobo):
             self.stop_simulation()
         self.configure_simulation_timing()
 
-
         try:
-            self._sim.setBoolParam(self._sim.boolparam_display_enabled, False)
+            self._sim.setBoolParam(
+                self._sim.boolparam_realtime_simulation, False
+            )
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            self._sim.setBoolParam(
+                self._sim.boolparam_display_enabled, rendering_enabled
+            )
         except Exception:
             pass
 
@@ -329,32 +343,30 @@ class SimulationRobobo(IRobobo):
     def play_simulation(self):
         'Start the simulation.'
         self._sim.startSimulation()
-        for _ in range(100):
-            if self.is_running():
-                return
-            time.sleep(0.002)
-        if not self.is_running():
-            raise RuntimeError("Simulation failed to start")
+        self._wait_for_state(self.is_running, "start")
 
     def pause_simulation(self):
         'Pause the simulation.'
         self._sim.pauseSimulation()
-        for _ in range(100):
-            if self.is_paused():
-                return
-            time.sleep(0.002)
-        if not self.is_paused():
-            raise RuntimeError("Simulation failed to pause")
+        self._wait_for_state(self.is_paused, "pause")
 
     def stop_simulation(self):
         'Stop the simulation.'
         self._sim.stopSimulation()
-        for _ in range(100):
-            if self.is_stopped():
+        self._wait_for_state(self.is_stopped, "stop")
+
+    def _wait_for_state(
+        self, predicate: Callable[[], bool], transition: str
+    ) -> None:
+        """Wait for a simulation transition within the configured timeout."""
+        deadline = time.monotonic() + self._timeout_dur
+        while time.monotonic() < deadline:
+            if predicate():
                 return
             time.sleep(0.002)
-        if not self.is_stopped():
-            raise RuntimeError("Simulation failed to stop")
+        raise RuntimeError(
+            f"Simulation failed to {transition} within {self._timeout_dur:g} seconds"
+        )
 
     def is_stopped(self) -> bool:
         'Return wether the simulation is stopped.'
@@ -656,25 +668,33 @@ class SimulationRobobo(IRobobo):
             Did you specify the IP adress of your computer in scripts/setup.bash?
             """)
         self._logger(f"Looked for API at port: {api_port} at IP adress: {ip_adress}")
-        # Yes, sys.exit(1) gets caught by the zmq runtime. No, I don't know why.
-        quit_hard()
+        raise ConnectionError(
+            f"Could not connect to CoppeliaSim at {ip_adress}:{api_port}"
+        )
 
 
 # This only works on Unix. Luckily, we are in Docker.
 def timeout(func: Callable[[], T], timeout_duration: int = 10) -> T:
-    def timeouterror_handler(_signum, _frame):
-        raise TimeoutError()
+    """Run a callable with a bounded wait."""
+    result: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
 
-    original_handler = signal.getsignal(signal.SIGALRM)
+    def invoke() -> None:
+        """Execute the callable and publish its result."""
+        try:
+            result.put((True, func()))
+        except BaseException as exc:
+            result.put((False, exc))
 
-    # set the timeout handler
-    signal.signal(signal.SIGALRM, timeouterror_handler)
-    signal.alarm(timeout_duration)
+    threading.Thread(target=invoke, daemon=True).start()
     try:
-        return func()
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, original_handler)
+        succeeded, value = result.get(timeout=timeout_duration)
+    except queue.Empty as exc:
+        raise TimeoutError(
+            f"operation exceeded {timeout_duration:g} seconds"
+        ) from exc
+    if succeeded:
+        return value  # type: ignore[return-value]
+    raise value  # type: ignore[misc]
 
 
 # The API code catches too much, making it hard to quit when failing.

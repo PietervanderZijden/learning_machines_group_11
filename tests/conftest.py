@@ -1,3 +1,6 @@
+'Shared fixtures for robobo_interface tests.'
+from __future__ import annotations
+
 import os
 import sys
 from pathlib import Path
@@ -24,7 +27,7 @@ def sim_ip() -> str:
 
 @pytest.fixture(scope="session")
 def sim_robobo(sim_port: int, sim_ip: str):
-    """Provide a connected simulator interface."""
+    'Provide a connected SimulationRobobo that is stopped between tests.'
     from robobo_interface import SimulationRobobo
 
     rob = SimulationRobobo(api_port=sim_port, ip_adress=sim_ip)

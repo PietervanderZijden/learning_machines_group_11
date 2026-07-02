@@ -31,12 +31,14 @@ class TestMoveRetry:
 
 
 class TestLazyHardwareImport:
+    """Verify deferred hardware dependency loading."""
+
     def test_hardware_not_imported_at_module_level(self):
-        import robobo_interface
+        """Keep the hardware module unloaded after importing the package."""
+        import importlib
         import sys
+        import robobo_interface
 
-
-
-        assert hasattr(robobo_interface, "__getattr__"), (
-            "Module should have __getattr__ for lazy imports"
-        )
+        sys.modules.pop("robobo_interface.hardware", None)
+        importlib.reload(robobo_interface)
+        assert "robobo_interface.hardware" not in sys.modules
